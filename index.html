@@ -1,0 +1,1241 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- Security note for production integration on hjbxywy.com:
+         For live site, consider self-hosting Tailwind/FontAwesome/jsPDF or add SRI hashes + strict CSP.
+         Current CDNs chosen for zero-dependency standalone embed. Avoid if host has strict CSP.
+         XSS mitigations applied to user symptom rendering (textContent/DOM over innerHTML).
+    -->
+    <title>罕见病初筛智能体 · 罕见病寻医问药</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&amp;family=Inter:wght@400;500;600&amp;display=swap');
+        
+        :root {
+            --primary: #0F766E;
+            --primary-light: #14B8A6;
+            --accent: #059669;
+        }
+        
+        body {
+            font-family: 'Noto Sans SC', 'Inter', system-ui, -apple-system, sans-serif;
+        }
+        
+        .medical-card {
+            transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), 
+                        box-shadow 0.2s cubic-bezier(0.4, 0.0, 0.2, 1);
+        }
+        
+        .medical-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1);
+        }
+
+        .symptom-chip {
+            transition: all 0.1s ease;
+        }
+        
+        .symptom-chip.active {
+            background-color: #0F766E;
+            color: white;
+            border-color: #0F766E;
+        }
+
+        .agent-bubble {
+            animation: fadeInUp 0.3s ease forwards;
+        }
+
+        @keyframes fadeInUp {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .match-bar {
+            transition: width 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
+        }
+
+        .section-header {
+            font-weight: 700;
+            letter-spacing: -0.025em;
+        }
+
+        .disclaimer {
+            font-size: 0.875rem;
+            line-height: 1.5;
+            background: linear-gradient(to right, #FEF2F2, #FEF2F2);
+            border-left: 4px solid #EF4444;
+        }
+
+        .report-print {
+            font-family: 'Noto Sans SC', system-ui, sans-serif;
+        }
+
+        .hpo-tag {
+            font-size: 0.75rem;
+            padding: 1px 8px;
+            background: #F1F5F9;
+            color: #334155;
+            border-radius: 9999px;
+            border: 1px solid #E2E8F0;
+        }
+
+        .nav-active {
+            color: #0F766E;
+            border-bottom: 2px solid #0F766E;
+        }
+
+        .result-card {
+            border-left: 4px solid #0F766E;
+        }
+
+        .metric {
+            font-variant-numeric: tabular-nums;
+        }
+
+        .chat-scroll {
+            scrollbar-width: thin;
+            scrollbar-color: #CBD5E1 #F8FAFC;
+        }
+
+        .medical-shadow {
+            box-shadow: 0 10px 15px -3px rgb(15 118 110 / 0.1), 
+                        0 4px 6px -4px rgb(15 118 110 / 0.1);
+        }
+        
+        .clean-white {
+            background-color: #ffffff;
+        }
+
+        @media print {
+            .no-print { display: none !important; }
+            .print-only { display: block !important; }
+            body { background: white; }
+            .medical-card, .result-card { box-shadow: none; border: 1px solid #e2e8f0; }
+            .match-bar { transition: none; }
+        }
+        
+        .symptom-grid {
+            scrollbar-width: thin;
+        }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-900">
+    <!-- Top Site Nav (mimics hjbxywy.com style) -->
+    <nav class="bg-white border-b border-slate-200 sticky top-0 z-50 no-print">
+        <div class="max-w-screen-2xl mx-auto">
+            <div class="px-6 py-3 flex items-center justify-between">
+                <div class="flex items-center gap-x-3">
+                    <div class="flex items-center gap-x-2">
+                        <div class="w-9 h-9 bg-teal-700 rounded-xl flex items-center justify-center">
+                            <i class="fa-solid fa-heart-pulse text-white text-xl"></i>
+                        </div>
+                        <div>
+                            <div class="font-bold text-xl tracking-tight">罕见病寻医问药</div>
+                            <div class="text-[10px] text-slate-500 -mt-1">hjbxywy.com</div>
+                        </div>
+                    </div>
+                    <div class="hidden md:block h-5 w-px bg-slate-200 mx-1"></div>
+                    <div class="hidden md:flex items-center text-sm font-medium text-teal-700">
+                        <span class="px-3 py-1 bg-teal-50 rounded-full text-teal-700 text-xs font-semibold tracking-wider">罕见病初筛</span>
+                    </div>
+                </div>
+                
+                <div class="flex items-center gap-x-4 text-sm">
+                    <a href="#" onclick="window.location.reload()" 
+                       class="hidden md:inline-flex items-center gap-x-1.5 px-3 py-1.5 text-slate-600 hover:text-slate-900 transition-colors">
+                        <i class="fa-solid fa-home w-4"></i>
+                        <span>首页</span>
+                    </a>
+                    <a href="#" class="hidden md:inline-flex items-center gap-x-1.5 px-3 py-1.5 text-slate-600 hover:text-slate-900 transition-colors">
+                        <i class="fa-solid fa-book-open w-4"></i>
+                        <span>科普园地</span>
+                    </a>
+                    <a href="#" class="hidden md:inline-flex items-center gap-x-1.5 px-3 py-1.5 text-slate-600 hover:text-slate-900 transition-colors">
+                        <i class="fa-solid fa-hospital w-4"></i>
+                        <span>寻医问药</span>
+                    </a>
+                    
+                    <button onclick="showHelpModal()"
+                            class="inline-flex items-center gap-x-2 rounded-xl bg-white border border-slate-200 hover:bg-slate-50 px-4 py-2 text-sm font-medium transition-all active:scale-[0.985]">
+                        <i class="fa-solid fa-circle-info"></i>
+                        <span class="hidden sm:inline">使用说明</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Hero / Header -->
+    <div class="max-w-screen-2xl mx-auto px-6 pt-8 pb-6">
+        <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-y-4">
+            <div>
+                <div class="inline-flex items-center gap-x-2 rounded-full bg-teal-100 text-teal-800 px-3 py-1 text-xs font-semibold tracking-[1px] mb-3">
+                    <i class="fa-solid fa-robot"></i>
+                    <span>AI 辅助 · 表型驱动</span>
+                </div>
+                <h1 class="text-4xl md:text-5xl font-bold tracking-tighter section-header">罕见病初筛智能体</h1>
+                <p class="mt-3 max-w-xl text-lg text-slate-600">
+                    基于临床表型标准化匹配的智能初步筛查<br>
+                    <span class="text-teal-700 font-medium">提升诊断可及性 · 缩短诊断周期</span>
+                </p>
+            </div>
+            
+            <div class="flex items-center gap-x-3 text-sm">
+                <div class="flex -space-x-2">
+                    <div class="w-8 h-8 bg-white ring-2 ring-white rounded-full overflow-hidden border"><i class="fa-solid fa-user-md text-teal-700 p-1.5"></i></div>
+                    <div class="w-8 h-8 bg-white ring-2 ring-white rounded-full overflow-hidden border"><i class="fa-solid fa-dna text-teal-700 p-1.5"></i></div>
+                </div>
+                <div class="text-xs text-slate-500 max-w-[160px]">
+                    参考中国罕见病目录、HPO 表型本体及多学科专家共识知识库
+                </div>
+            </div>
+        </div>
+
+        <!-- Critical Disclaimer Banner -->
+        <div class="mt-6 disclaimer border border-red-200 rounded-2xl px-5 py-3.5 flex flex-col sm:flex-row gap-3 items-start sm:items-center text-red-700">
+            <div class="flex items-center gap-x-2 shrink-0 font-semibold">
+                <i class="fa-solid fa-exclamation-triangle"></i>
+                <span>重要声明</span>
+            </div>
+            <div class="text-sm leading-relaxed">
+                本工具<strong>仅为教育与初步筛查辅助</strong>，不构成任何医疗诊断、治疗建议或预后判断。罕见病确诊必须由具备资质的医师通过详细病史、体格检查、实验室检查、影像学及基因检测等综合完成。请勿因本结果延误、放弃或自行决定诊疗方案。如有急重症状请立即就近急诊。
+            </div>
+        </div>
+    </div>
+
+    <div class="max-w-screen-2xl mx-auto px-6 pb-12">
+        <div class="grid grid-cols-1 xl:grid-cols-12 gap-6">
+            
+            <!-- Left: Patient Info + Symptom Collection -->
+            <div class="xl:col-span-5 space-y-6">
+                <!-- Patient Context -->
+                <div class="medical-card bg-white rounded-3xl border border-slate-200 p-6 medical-shadow">
+                    <div class="flex items-center justify-between mb-4">
+                        <div class="font-semibold text-lg flex items-center gap-x-2">
+                            <i class="fa-solid fa-user w-5 text-teal-700"></i>
+                            <span>患者基本信息</span>
+                        </div>
+                        <button onclick="loadSampleCase()" 
+                                class="text-xs px-3 py-1 rounded-xl bg-teal-50 hover:bg-teal-100 text-teal-700 font-medium flex items-center gap-x-1 transition-colors">
+                            <i class="fa-solid fa-magic"></i>
+                            <span>加载示例</span>
+                        </button>
+                    </div>
+                    
+                    <div class="grid grid-cols-2 gap-4">
+                        <div>
+                            <label for="age-group" class="block text-xs font-medium text-slate-500 mb-1.5">年龄段</label>
+                            <select id="age-group" class="w-full rounded-2xl border border-slate-200 bg-white px-3 py-2.5 text-sm focus:outline-none focus:border-teal-700 focus:ring-2 focus:ring-offset-1 focus:ring-teal-700">
+                                <option value="">请选择...</option>
+                                <option value="新生儿期">新生儿期 (0-28天)</option>
+                                <option value="婴儿期">婴儿期 (1-12月)</option>
+                                <option value="儿童期">儿童期 (1-12岁)</option>
+                                <option value="青少年">青少年 (12-18岁)</option>
+                                <option value="成年">成年 (18岁以上)</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-slate-500 mb-1.5">性别</label>
+                            <div class="flex gap-2">
+                                <label class="flex-1 cursor-pointer">
+                                    <input type="radio" name="gender" value="male" class="peer hidden" checked>
+                                    <div class="peer-checked:bg-teal-700 peer-checked:text-white border border-slate-200 rounded-2xl px-3 py-2 text-center text-sm transition-all">男</div>
+                                </label>
+                                <label class="flex-1 cursor-pointer">
+                                    <input type="radio" name="gender" value="female" class="peer hidden">
+                                    <div class="peer-checked:bg-teal-700 peer-checked:text-white border border-slate-200 rounded-2xl px-3 py-2 text-center text-sm transition-all">女</div>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="mt-4">
+                        <label for="onset-age" class="block text-xs font-medium text-slate-500 mb-1.5">起病年龄段</label>
+                        <select id="onset-age" class="w-full rounded-2xl border border-slate-200 bg-white px-3 py-2.5 text-sm focus:outline-none focus:border-teal-700 focus:ring-2 focus:ring-offset-1 focus:ring-teal-700">
+                            <option value="">与当前年龄相近或请选择</option>
+                            <option value="新生儿期">新生儿期</option>
+                            <option value="婴儿期">婴儿期</option>
+                            <option value="儿童期">儿童期</option>
+                            <option value="青少年">青少年期</option>
+                            <option value="成年">成年期</option>
+                            <option value="进行性">进行性 / 逐渐出现</option>
+                        </select>
+                    </div>
+                    
+                    <div class="mt-4">
+                        <label class="block text-xs font-medium text-slate-500 mb-1.5">家族史与遗传风险</label>
+                        <div class="flex flex-wrap gap-2">
+                            <label class="inline-flex items-center gap-x-2 rounded-2xl border border-slate-200 px-3 py-1.5 text-sm cursor-pointer has-[:checked]:bg-teal-50 has-[:checked]:border-teal-200">
+                                <input type="checkbox" id="family-similar" class="accent-teal-700">
+                                <span>有类似症状家族成员</span>
+                            </label>
+                            <label class="inline-flex items-center gap-x-2 rounded-2xl border border-slate-200 px-3 py-1.5 text-sm cursor-pointer has-[:checked]:bg-teal-50 has-[:checked]:border-teal-200">
+                                <input type="checkbox" id="consanguinity" class="accent-teal-700">
+                                <span>近亲结婚史</span>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Symptom Input -->
+                <div class="medical-card bg-white rounded-3xl border border-slate-200 p-6 medical-shadow">
+                    <div class="font-semibold text-lg mb-3 flex items-center gap-x-2">
+                        <i class="fa-solid fa-stethoscope w-5 text-teal-700"></i>
+                        <span>症状描述与表型采集</span>
+                    </div>
+                    
+                    <!-- Quick Symptom Chips -->
+                    <div class="mb-3">
+                        <div class="text-xs uppercase tracking-widest text-slate-500 mb-2 font-medium">常见表型（点击快速添加）</div>
+                        <div class="flex flex-wrap gap-1.5 symptom-grid max-h-[112px] overflow-auto pb-1" id="symptom-chips">
+                            <!-- Populated by JS -->
+                        </div>
+                    </div>
+                    
+                    <!-- Free text + Chat style input -->
+                    <div class="relative">
+                        <textarea id="symptom-input" rows="3" 
+                                  class="w-full resize-y rounded-3xl border border-slate-200 px-4 py-3 text-sm focus:border-teal-700 focus:ring-1 focus:ring-teal-700 placeholder:text-slate-400"
+                                  placeholder="描述主要症状，例如：进行性双下肿无力、不能独坐、舌头有细小颤动... 或 脾脏明显肿大、反复鼻出血、骨痛"></textarea>
+                        
+                        <button onclick="addFreeTextSymptom()"
+                                class="absolute bottom-3 right-3 px-4 py-1.5 bg-teal-700 hover:bg-teal-800 active:bg-teal-900 transition-colors text-white text-sm rounded-2xl flex items-center gap-x-1.5 shadow-sm">
+                            <i class="fa-solid fa-plus"></i>
+                            <span class="font-medium">添加</span>
+                        </button>
+                    </div>
+                    
+                    <div class="mt-2 flex items-center gap-2 text-[11px] text-slate-500">
+                        <i class="fa-solid fa-info-circle"></i>
+                        <span>支持自然语言，系统会自动标准化为临床表型</span>
+                    </div>
+                    
+                    <!-- Current collected symptoms -->
+                    <div class="mt-4">
+                        <div class="flex items-center justify-between text-xs mb-1.5">
+                            <div class="font-medium text-slate-600">已采集表型 <span id="symptom-count" class="font-mono text-teal-700">0</span></div>
+                            <button onclick="clearAllSymptoms()" class="text-red-500 hover:text-red-600 text-xs flex items-center gap-1">
+                                <i class="fa-solid fa-trash-can"></i> <span>清空</span>
+                            </button>
+                        </div>
+                        <div id="collected-symptoms" class="flex flex-wrap gap-1.5 min-h-[42px] p-2 bg-slate-50 rounded-2xl border border-slate-100">
+                            <!-- JS injected tags -->
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="flex gap-3">
+                    <button onclick="runScreeningAnalysis()" 
+                            class="flex-1 h-14 bg-teal-700 hover:bg-teal-800 active:bg-teal-900 transition-all text-white rounded-3xl font-semibold text-base flex items-center justify-center gap-x-2 shadow-lg shadow-teal-900/20">
+                        <i class="fa-solid fa-brain"></i>
+                        <span>启动智能分析</span>
+                    </button>
+                    <button onclick="resetAll()" 
+                            class="h-14 px-6 border border-slate-300 hover:bg-white rounded-3xl text-sm font-medium flex items-center gap-x-2 transition-colors">
+                        <i class="fa-solid fa-undo"></i>
+                        <span class="hidden sm:inline">重置</span>
+                    </button>
+                </div>
+            </div>
+            
+            <!-- Right: Agent Status + Results -->
+            <div class="xl:col-span-7">
+                <div class="medical-card bg-white rounded-3xl border border-slate-200 overflow-hidden medical-shadow min-h-[620px] flex flex-col">
+                    
+                    <!-- Agent Header -->
+                    <div class="px-6 pt-5 pb-4 bg-gradient-to-r from-teal-700/5 to-transparent border-b flex items-center justify-between">
+                        <div class="flex items-center gap-x-3">
+                            <div class="w-9 h-9 rounded-2xl bg-teal-700 flex items-center justify-center">
+                                <i class="fa-solid fa-robot text-white"></i>
+                            </div>
+                            <div>
+                                <div class="font-semibold">罕见病初筛智能助手</div>
+                                <div class="text-xs text-teal-600 -mt-0.5">表型匹配引擎 · 知识库 v2026.02</div>
+                            </div>
+                        </div>
+                        <div class="text-[10px] px-2.5 py-0.5 bg-white rounded-xl border text-teal-700 font-medium tracking-wide">本地计算 · 隐私安全</div>
+                    </div>
+                    
+                    <!-- Analysis Progress / Status -->
+                    <div id="analysis-status" role="status" aria-live="polite" aria-atomic="true" class="hidden px-6 py-3 bg-amber-50 border-b text-sm items-center gap-x-3 text-amber-800">
+                        <i class="fa-solid fa-spinner fa-spin"></i>
+                        <span id="status-text">正在进行表型标准化与多疾病匹配...</span>
+                    </div>
+                    
+                    <!-- Results Area -->
+                    <div id="results-area" class="flex-1 p-6 overflow-auto chat-scroll">
+                        <!-- Placeholder / Intro -->
+                        <div id="results-placeholder" class="h-full flex flex-col items-center justify-center text-center px-6">
+                            <div class="w-16 h-16 rounded-3xl bg-teal-100 flex items-center justify-center mb-4">
+                                <i class="fa-solid fa-search text-teal-700 text-3xl"></i>
+                            </div>
+                            <div class="font-semibold text-xl">准备开始初筛</div>
+                            <p class="mt-2 text-slate-600 max-w-sm text-sm">
+                                填写左侧患者信息与症状后，点击“启动智能分析”。<br>
+                                智能体将提取标准化表型、匹配知识库并生成可解释的差异诊断。
+                            </p>
+                            
+                            <div class="mt-6 flex gap-2">
+                                <button onclick="loadSampleCase(0)" class="text-xs px-3 py-1.5 rounded-2xl border border-teal-200 hover:bg-teal-50 text-teal-700">加载 SMA 示例</button>
+                                <button onclick="loadSampleCase(1)" class="text-xs px-3 py-1.5 rounded-2xl border border-teal-200 hover:bg-teal-50 text-teal-700">加载 戈谢病 示例</button>
+                            </div>
+                        </div>
+                        
+                        <!-- Populated Results -->
+                        <div id="results-content" class="hidden">
+                            <!-- JS injected -->
+                        </div>
+                    </div>
+                    
+                    <!-- Action Bar -->
+                    <div id="results-actions" class="hidden border-t bg-slate-50 px-6 py-4 flex flex-wrap gap-2 no-print">
+                        <button onclick="copyReportForDoctor()" 
+                                class="flex-1 sm:flex-none inline-flex items-center justify-center gap-x-2 px-5 h-10 rounded-2xl bg-white border hover:bg-white text-sm font-medium transition-colors">
+                            <i class="fa-solid fa-copy"></i>
+                            <span>复制给医生（结构化）</span>
+                        </button>
+                        
+                        <button onclick="printReport()" 
+                                class="flex-1 sm:flex-none inline-flex items-center justify-center gap-x-2 px-5 h-10 rounded-2xl bg-white border hover:bg-white text-sm font-medium transition-colors">
+                            <i class="fa-solid fa-print"></i>
+                            <span>打印 / 保存 PDF</span>
+                        </button>
+                        
+                        <button onclick="downloadPDF()" 
+                                class="flex-1 sm:flex-none inline-flex items-center justify-center gap-x-2 px-5 h-10 rounded-2xl bg-teal-700 text-white text-sm font-medium hover:bg-teal-800 transition-colors">
+                            <i class="fa-solid fa-file-pdf"></i>
+                            <span>下载专业报告 (PDF，中文渲染有限，推荐打印保存)</span>
+                        </button>
+                        
+                        <button onclick="resetAll(true)" 
+                                class="ml-auto text-sm px-4 text-slate-500 hover:text-slate-700 flex items-center gap-x-1">
+                            <i class="fa-solid fa-redo"></i> <span class="hidden sm:inline">新筛查</span>
+                        </button>
+                    </div>
+                </div>
+                
+                <div class="mt-3 text-[10px] text-center text-slate-400 px-2">
+                    数据本地处理 · 不会上传至任何服务器 · 知识库来源于公开指南与文献（定期更新）
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Footer / Trust signals -->
+    <div class="border-t bg-white py-5 text-xs text-slate-500 no-print">
+        <div class="max-w-screen-2xl mx-auto px-6 flex flex-col md:flex-row items-center justify-between gap-y-2">
+            <div>
+                参考依据：中国第一批罕见病目录（121种）、86个罕见病诊疗指南（2025版）、HPO 人类表型本体、Orphanet 及多学科专家共识。
+            </div>
+            <div class="flex items-center gap-x-4">
+                <a href="#" class="hover:text-teal-700">罕见病协作网医院查询</a>
+                <span class="text-slate-300">|</span>
+                <a href="#" class="hover:text-teal-700">反馈与建议</a>
+            </div>
+        </div>
+    </div>
+
+    <!-- Help Modal -->
+    <div id="help-modal" onclick="if (event.target.id === 'help-modal') hideHelpModal()" class="hidden fixed inset-0 bg-black/50 z-[100] flex items-center justify-center p-4">
+        <div onclick="event.stopImmediatePropagation()" class="bg-white w-full max-w-lg rounded-3xl overflow-hidden shadow-2xl">
+            <div class="px-6 py-4 border-b flex items-center justify-between">
+                <div class="font-semibold">智能体使用说明</div>
+                <button onclick="hideHelpModal()" class="text-2xl leading-none text-slate-400 hover:text-slate-600">×</button>
+            </div>
+            <div class="p-6 text-sm space-y-4 text-slate-600">
+                <div>
+                    <strong class="text-slate-800">1. 信息采集</strong><br>
+                    选择年龄与起病阶段、家族史有助于提高匹配精准度。X连锁疾病（如DMD、法布里）在男性中表现更典型。
+                </div>
+                <div>
+                    <strong class="text-slate-800">2. 症状输入</strong><br>
+                    点击常用表型标签快速添加，或在文本框用自然语言描述（例如“婴儿期进行性无力、舌震颤”），系统会自动映射到临床表型。
+                </div>
+                <div>
+                    <strong class="text-slate-800">3. 分析结果</strong><br>
+                    结果按匹配度排序，显示具体重叠的表型。每个疾病都附带推荐检查、建议转诊科室及红旗信号。
+                </div>
+                <div class="disclaimer p-3 rounded-xl text-red-700 text-xs">
+                    再次强调：本结果仅供参考。罕见病诊断复杂，强烈建议尽快至三级医院遗传代谢、神经肌肉或相应专科就诊。
+                </div>
+            </div>
+            <div class="bg-slate-50 px-6 py-3 text-xs flex justify-end">
+                <button onclick="hideHelpModal()" class="px-4 py-1.5 text-sm font-medium">我知道了</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Tailwind script config
+        function initTailwind() {
+            document.documentElement.style.setProperty('--accent', '#0F766E');
+            // Tailwind already loaded via CDN, runtime config optional
+        }
+
+        // Embedded Disease Knowledge Base (subset of diseases-kb.json for standalone)
+        const DISEASE_KB = [
+            {"id":"sma","name":"脊髓性肌缩缩症 (SMA)","category":"神经肌肉病","inheritance":"常染色体隐性 (AR)","prevalence":"约 1/6,000 - 1/10,000 活产儿","onset_groups":[" 新生儿期","婴儿期","儿童期","青少年","青少年/成年","成年","成人","青少年期","成年期"],"key_hpo_or_features":[" 进行性肌无力","肌张力低下","运动发育迟缓","舌肌纤颤","呼吸困难","吞咽困难","近端肌无力为主"],"critical_features":[" 进行性肌无力","舌肌纤颤"],"typical_onset":"婴儿期（I型最常见）","recommended_tests":"SMN1 基因检测（外显子7纯合缺失或复合杂合）、SMN2 拷贝数分析、肌电图","referral_dept":"神经内科（神经肌肉专科） / 儿科神经科 / 罕见病多学科团队","short_desc":"SMN1 基因突变导致脊髓前角运动神经元退化，进行性、对称性肌无力和缩缩。早期诊断 + 疾病修正治疗（基因疗法、ASO、SMN增强剂）可显著改善运动功能与生存。","red_flags":"婴儿期进行性无力、不能独坐、舌震颤、呼吸浅快；儿童期进行性行走困难后喪失","next_action":"立即转诊神经肌肉专科，争取早期治疗窗口"},
+            {"id":"gaucher","name":"戈谢病 (Gaucher Disease)","category":"溶齿体存积病 / 代谢病","inheritance":"常染色体隐性 (AR)","prevalence":"中国人群约 1/50万 - 1/20万（Ⅰ型为主）","onset_groups":[" 婴儿期","儿童期","青少年","成年"],"key_hpo_or_features":[" 脾肿大","肝肿大","肝脾肿大","血小板减少","贫血","骨痛","骨危象","病理性骨折"],"critical_features":[" 脾肿大","肝脾肿大","血小板减少"],"typical_onset":"儿童期或成年（Ⅰ型）","recommended_tests":"白细胞或成纳维细胞 β-葡萄糖脑菜苷脂酶活性测定、GBA 基因检测、骨髓戈谢细胞（辅助）、血清酸性磷酸酶、生物标志物 Lyso-GL1","referral_dept":"儿科 / 血液内科 / 消化内科 / 遗传代谢病专科 / 罕见病MDT","short_desc":"GBA 基因突变导致葡萄糖脑菜苷脂在巨嗡细胞溶齿体存积。典型表现肝脾肿大、血液学异常、骨骼受累。酶替代治疗（ERT）和底物减少疗法（SRT）有效。","red_flags":"不明原因巨脾 + 血小板减少 + 骨痛/骨折；儿童生长迟缓","next_action":"转诊代谢病或血液专科，尽早酶活性筛查"},
+            {"id":"wilson","name":"肝豆状核变性 (Wilson Disease / 威尔逊病)","category":"金属代谢病 / 肝病","inheritance":"常染色体隐性 (AR)","prevalence":"约 1/30,000 - 1/100,000","onset_groups":[" 儿童期","青少年","成年"],"key_hpo_or_features":[" 肝功能异常","肝硬化","黄疸","震颤","肌张力障碍","构音障碍","精神行为异常","角膜K-F环"],"critical_features":[" 肝病","锥体外系症状","K-F环"],"typical_onset":"5-35岁（肝型儿童多见，神经型青少年/成人）","recommended_tests":"血清铜蓝蛋白、血清铜、 24h尿铜、肝铜定量、ATP7B 基因检测、裂隙灯查K-F环、脑MRI（基底节信号异常）","referral_dept":"消化内科 / 神经内科 / 肝病专科 / 儿科 / 遗传代谢","short_desc":"ATP7B 突变导致铜排泄障碍，铜沉积于肝、脑、角膜等。早期青霍胺或锌剂治疗可防止致命并发症；晚期需肝移植。","red_flags":"青少年不明原因肝病 + 神经精神症状；家族有类似肝/神经病史","next_action":"急诊/专科评估铜代谢指标，尽早治疗可正常寿命"},
+            {"id":"pompe","name":"庞贝病 (Pompe Disease / 糖原存积病Ⅱ型)","category":"溶齿体存积病 / 神经肌肉 / 心肚病","inheritance":"常染色体隐性 (AR)","prevalence":"约 1/40,000","onset_groups":[" 新生儿期","婴儿期","儿童期","青少年","成年","成人","青少年期","成年期","成年（晚发型）"],"key_hpo_or_features":[" 肌无力","肌张力低下","呼吸困难","心肚肿厚","喂养困难","发育迟缓","运动里程碑延迟"],"critical_features":[" 进行性肌无力","呼吸衰竭","心肚病（婴儿型）"],"typical_onset":"婴儿型（经典）<1岁；晚发型儿童或成人","recommended_tests":"酸性α-葡萄糖苷酯 (GAA) 活性（干血片筛查/确诊）、GAA 基因检测、心超、肌酶、呼吸功能、肌肉活检（糖原累积）","referral_dept":"儿科神经/心血管 / 神经内科 / 呼吸内科 / 代谢病专科","short_desc":"GAA 缺乏导致溶齿体糖原在心肚、骨骼肌、神经等蓄积。婴儿型进展迅速致命；晚发型主要呼吸和肢带肌无力。酶替代治疗（ERT）可改善。","red_flags":"婴儿肥厚性心肚病 + 肌无力；儿童/成人进行性呼吸困难 + 近端肌无力","next_action":"转诊代谢或神经肌肉专科，干血片 GAA 筛查快速"},
+            {"id":"fabry","name":"法布里病 (Fabry Disease)","category":"溶齿体存积病 / 心肾 / 神经","inheritance":"X连锁 (XL)","prevalence":"约 1/40,000 - 1/117,000（男性为主，女性杂合子也可发病）","onset_groups":[" 儿童期","青少年","成年"],"key_hpo_or_features":[" 肢端疼痛","痛性感觉异常","血管角屈瘤","少汗或无汗","蛋白尿","肾功能不全","心肚肿厚","年轻央中"],"critical_features":[" 肢端烧烤痛","血管角屈瘤","肾脏受累"],"typical_onset":"儿童期疼痛，成年后心肾表现","recommended_tests":"α-半乳糖苷酯A 活性（男性）、GLA 基因检测、血浆 Lyso-Gb3、肾活检、心超/心脏MRI、角膜/皮肤检查","referral_dept":"肾内科 / 心内科 / 神经内科 / 皮肤科 / 遗传代谢 / 儿科","short_desc":"GLA 突变导致糖鞘脂 Gb3 蓄积。男性多重症，女性变异大。早期 ERT 或口服药物可延缓心肾脑并发症。","red_flags":"儿童不明原因肢端疼 + 少汗 + 皮肤血管角屈瘤；家族年轻肾衰/心肚病/央中史","next_action":"转诊肾内/心内或代谢专科，酶活性+基因确诊"},
+            {"id":"dmd","name":"杜氏肌营养不良症 (Duchenne Muscular Dystrophy, DMD)","category":"神经肌肉病 / 肌营养不良","inheritance":"X连锁 (XL)（男性为主）","prevalence":"约 1/3,500 - 1/5,000 男性活产","onset_groups":[" 儿童期","儿童期（2-5岁常见）","儿童","幼儿"],"key_hpo_or_features":[" 进行性肌无力","Gowers征","脑肠肌假性肿大","运动发育迟缓","血清CK显著升高","心肚病","呼吸功能下降"],"critical_features":[" 进行性近端肌无力","Gowers征","假性肿大"],"typical_onset":"2-5岁出现症状，10岁左右喪失行走","recommended_tests":"血清CK、DMD 基因检测（缺失/重复或测序）、肌肉活检（抗肌缩缩蛋白缺失）、心超/心电、呼吸监测","referral_dept":"儿科神经 / 神经内科（神经肌肉） / 康复科 / 心内科","short_desc":"DMD 基因突变导致抗肌缩缩蛋登缺失，进行性骨骼肌、心肚、呼吸肌变性。激素治疗 + 心脏管理 + 新兴基因疗法/外显子跳跃可延缓进展。","red_flags":"男孩 3-5岁行走困难、从地起立困难（Gowers）、跑跳异常、脑肠肌大而硬","next_action":"儿科神经肌肉专科基因检测，尽早干预"},
+            {"id":"mps1","name":"黏多糖存积症Ⅰ型 (MPS I, Hurler / Hurler-Scheie 综合征)","category":"溶齿体存积病 / 骨骼 / 发育","inheritance":"常染色体隐性 (AR)","prevalence":"约 1/100,000","onset_groups":[" 婴儿期","儿童期"],"key_hpo_or_features":[" 粗糙面容","肝脾肿大","骨骼发育异常","关节僵硬","发育迟缓","角膜混浊","心脏瓣膜病","呼吸道桷阻"],"critical_features":[" 特殊面容","肝脾肿大","骨骼畸形","发育迟缓"],"typical_onset":"Hurler 重型 6-12月起病；Scheie 轻型较晚","recommended_tests":"尿糖胺聚糖 (GAG) 定量、α-L-艾杜糖醛酸苷酯活性、IDUA 基因检测、骨骼X线、超声心动、眼科、肺功能","referral_dept":"儿科遗传代谢 / 骨科 / 心内科 / 耳鼻喉 / 眼科 / 康复","short_desc":"IDUA 缺乏导致糖胺聚糖蓄积。多系统进行性损害（骨骼、脏器、神经）。酶替代 + 造血干细胞移植（重型早期）是主要治疗。","red_flags":"婴儿期进行性粗面容 + 肝脾大 + 生长迟缓 + 关节活动受限","next_action":"代谢病专科评估，尽早 ERT/移植窗口"},
+            {"id":"pku","name":"苯丙酮尿症 (Phenylketonuria, PKU)","category":"氨基酸代谢病","inheritance":"常染色体隐性 (AR)","prevalence":"中国约 1/10,000 - 1/15,000 新生儿","onset_groups":[" 新生儿期（筛查发现）","婴儿期（未经治疗）"],"key_hpo_or_features":[" 智力障碍","发育迟缓","媛痫","行为问题","皮肤色素减退","鼠尿味","小头畸形"],"critical_features":[" 未经治疗的智力发育落后","媛痫"],"typical_onset":"出生后数月出现神经症状（若未筛查）","recommended_tests":"新生儿筛查血 Phe 浓度、PAH 基因检测、血氨基酸谱、尿有机酸","referral_dept":"儿科内分泌/代谢 / 神经内科 / 营养科","short_desc":"PAH 缺乏导致苯丙氨酸蓄积。早期低苯丙氨酸饮食治疗可使智力发育正常；晚发现则不可逆智力残疾。","red_flags":"新生儿筛查阳性；未经筛查婴儿智力倒退 + 特殊气味 + 皮肤白","next_action":"立即转诊代谢病专科，开始严格饮食管理"}
+        ];
+
+        // Common symptom chips (Chinese clinical phenotypes)
+        const COMMON_SYMPTOM_CHIPS = [
+            "进行性肌无力", "肌张力低下", "运动发育迟缓", "舌肌纤颤",
+            "呼吸困难", "吞咽困难", "脾肿大", "肝脾肿大", "血小板减少",
+            "贫血", "骨痛", "肝功能异常", "震颤", "肌张力障碍", "构音障碍",
+            "精神行为异常", "角膜K-F环", "心肚肿厚", "肢端疼痛", "血管角屈瘤",
+            "Gowers征", "脑肠肌假性肿大", "特殊面容", "关节僵硬", "角膜混浊",
+            "智力障碍", "媛痫", "发育迟缓", "共浊失调"
+        ];
+
+        let collectedSymptoms = [];
+
+        function initSymptomChips() {
+            const container = document.getElementById('symptom-chips');
+            container.innerHTML = '';
+            
+            COMMON_SYMPTOM_CHIPS.forEach(sym => {
+                const chip = document.createElement('button');
+                chip.className = `symptom-chip px-3 py-1.5 min-h-[36px] text-xs rounded-2xl border border-slate-200 bg-white hover:bg-teal-50 hover:border-teal-200 active:scale-[0.985] transition-all whitespace-nowrap`;
+                chip.textContent = sym;
+                chip.setAttribute('aria-pressed', 'false');
+                chip.onclick = () => toggleSymptomChip(chip, sym);
+                container.appendChild(chip);
+            });
+        }
+
+        function toggleSymptomChip(chipEl, symptom) {
+            const idx = collectedSymptoms.indexOf(symptom);
+            if (idx === -1) {
+                collectedSymptoms.push(symptom);
+                chipEl.classList.add('active');
+                chipEl.setAttribute('aria-pressed', 'true');
+            } else {
+                collectedSymptoms.splice(idx, 1);
+                chipEl.classList.remove('active');
+                chipEl.setAttribute('aria-pressed', 'false');
+            }
+            renderCollectedSymptoms();
+        }
+
+        function addFreeTextSymptom() {
+            const input = document.getElementById('symptom-input');
+            const val = input.value.trim();
+            if (!val) return;
+
+            // Split by common separators + basic caps for safety (prevent DoS / huge DOM)
+            const parts = val.split(/[\uff0c,\u3001\u3002.\n]/).map(s => s.trim()).filter(Boolean);
+            const MAX_SYMPTOMS = 25;
+            const MAX_LEN = 200;
+            
+            parts.forEach(p => {
+                if (p.length > 1 && p.length <= MAX_LEN && collectedSymptoms.length < MAX_SYMPTOMS && !collectedSymptoms.includes(p)) {
+                    collectedSymptoms.push(p);
+                }
+            });
+            
+            input.value = '';
+            renderCollectedSymptoms();
+        }
+
+        function renderCollectedSymptoms() {
+            const container = document.getElementById('collected-symptoms');
+            const countEl = document.getElementById('symptom-count');
+            
+            container.innerHTML = '';
+            countEl.textContent = collectedSymptoms.length;
+            
+            if (collectedSymptoms.length === 0) {
+                const empty = document.createElement('div');
+                empty.className = 'text-xs text-slate-400 px-2 py-1 italic';
+                empty.textContent = '尚未添加症状';
+                container.appendChild(empty);
+                return;
+            }
+            
+            collectedSymptoms.forEach((sym, index) => {
+                const tag = document.createElement('div');
+                tag.className = `inline-flex items-center gap-x-1.5 bg-white border border-slate-200 text-sm rounded-2xl pl-3 pr-1.5 py-0.5 shadow-sm`;
+                // Safe DOM construction to prevent XSS from user symptom text
+                const span = document.createElement('span');
+                span.className = 'text-slate-700';
+                span.textContent = sym;
+                const btn = document.createElement('button');
+                btn.className = 'w-6 h-6 flex items-center justify-center text-slate-400 hover:text-red-500 rounded-full hover:bg-red-50 transition-colors';
+                btn.setAttribute('aria-label', '删除');
+                btn.innerHTML = '<i class="fa-solid fa-times text-xs"></i>';
+                tag.appendChild(span);
+                tag.appendChild(btn);
+                btn.onclick = () => {
+                    collectedSymptoms.splice(index, 1);
+                    renderCollectedSymptoms();
+                    // also deselect chip if present
+                    document.querySelectorAll('#symptom-chips button').forEach(b => {
+                        if (b.textContent === sym) b.classList.remove('active');
+                    });
+                };
+                container.appendChild(tag);
+            });
+        }
+
+        function clearAllSymptoms() {
+            collectedSymptoms = [];
+            document.querySelectorAll('#symptom-chips button').forEach(b => b.classList.remove('active'));
+            renderCollectedSymptoms();
+        }
+
+        // Simple normalization + HPO mapping in JS (mirrors Python enhanced mapper)
+        function normalizeSymptomJS(text) {
+            let t = text.trim();
+            const map = {
+                '肌张力低': '肌张力低下', '低肌张力': '肌张力低下',
+                '无力': '肌无力', '肝脾大': '肝脾肿大',
+                '脾大': '脾肿大', '肝大': '肝肿大',
+                '发育落后': '发育迟缓', '抽风': '媛痫', '惊厥': '媛痫'
+            };
+            Object.keys(map).forEach(k => {
+                if (t.includes(k)) t = t.replace(k, map[k]);
+            });
+            return t;
+        }
+
+        function mapToHPO(symptom) {
+            const norm = normalizeSymptomJS(symptom).toLowerCase();
+            // Very compact lexicon for client
+            const lexicon = {
+                "HP:0001252": {name: "Hypotonia", matches: ["肌张力低下", "低张力", "hypotonia"]},
+                "HP:0003324": {name: "Generalized muscle weakness", matches: ["肌无力", "进行性肌无力", "weakness"]},
+                "HP:0001263": {name: "Global developmental delay", matches: ["发育迟缓", "发育落后", "运动发育迟缓", "gdd"]},
+                "HP:0001250": {name: "Seizure", matches: ["媛痫", "抽掻", "发作", "seizure"]},
+                "HP:0002240": {name: "Splenomegaly", matches: ["脾肿大", "脾大", "巨脾"]},
+                "HP:0001433": {name: "Hepatomegaly", matches: ["肝肿大", "肝大"]},
+                "HP:0003271": {name: "Hepatosplenomegaly", matches: ["肝脾肿大", "肝脾大"]},
+                "HP:0001873": {name: "Thrombocytopenia", matches: ["血小板减少", "血小板低"]},
+                "HP:0001903": {name: "Anemia", matches: ["贫血"]},
+                "HP:0001638": {name: "Cardiomyopathy", matches: ["心肚病", "心肚肿厚"]},
+                "HP:0001999": {name: "Abnormal facial shape", matches: ["特殊面容", "面容粗糙"]},
+                "HP:0001249": {name: "Intellectual disability", matches: ["智力障碍", "智力低下"]},
+                "HP:0002093": {name: "Respiratory insufficiency", matches: ["呼吸困难", "呼吸衰竭"]},
+                "HP:0002015": {name: "Dysphagia", matches: ["吞咽困难"]},
+                "HP:0001337": {name: "Tremor", matches: ["震颤", "手抖"]},
+                "HP:0001332": {name: "Dystonia", matches: ["肌张力障碍"]},
+            };
+            
+            for (const [hpo, data] of Object.entries(lexicon)) {
+                for (const m of data.matches) {
+                    if (norm.includes(m.toLowerCase()) || m.toLowerCase().includes(norm)) {
+                        return { hpo_id: hpo, hpo_name: data.name, matched: symptom };
+                    }
+                }
+            }
+            // fuzzy fallback (very simple)
+            const all = Object.values(lexicon).flatMap(d => d.matches);
+            // skip complex fuzzy in browser for size; accept direct only for demo
+            return null;
+        }
+
+        function runScreeningAnalysis() {
+            if (collectedSymptoms.length === 0) {
+                const ph = document.getElementById('results-placeholder');
+                if (ph) {
+                    const orig = ph.innerHTML;
+                    ph.innerHTML = '<div class="p-3 text-red-700 bg-red-50 border border-red-200 rounded-2xl text-sm">请至少添加1-2个症状后再分析。</div>';
+                    setTimeout(() => { if (ph && ph.parentNode) ph.innerHTML = orig; }, 2400);
+                }
+                return;
+            }
+            if (collectedSymptoms.length > 25) {
+                const ph = document.getElementById('results-placeholder');
+                if (ph) {
+                    const orig = ph.innerHTML;
+                    ph.innerHTML = '<div class="p-3 text-red-700 bg-red-50 border border-red-200 rounded-2xl text-sm">症状数量过多（上限25条），请精简后重试。</div>';
+                    setTimeout(() => { if (ph && ph.parentNode) ph.innerHTML = orig; }, 2400);
+                }
+                return;
+            }
+            
+            const status = document.getElementById('analysis-status');
+            const placeholder = document.getElementById('results-placeholder');
+            const content = document.getElementById('results-content');
+            const actions = document.getElementById('results-actions');
+            
+            status.classList.remove('hidden');
+            status.classList.add('flex');
+            placeholder.classList.add('hidden');
+            content.classList.add('hidden');
+            actions.classList.add('hidden');
+            
+            const ageGroup = document.getElementById('age-group').value;
+            const onset = document.getElementById('onset-age').value || ageGroup;
+            const familySimilar = document.getElementById('family-similar').checked;
+            const consang = document.getElementById('consanguinity').checked;
+            const familyStr = (familySimilar || consang) ? "yes" : "no";
+            
+            // Simulate agent thinking steps
+            let step = 0;
+            const steps = [
+                "正在标准化输入表型并映射 HPO 术语...",
+                "正在比对 8 种重点罕见病知识库（含遗传模式与关键表型）...",
+                "计算匹配度、年龄并合度及家族史加权分数...",
+                "生成可解释差异诊断与推荐行动..."
+            ];
+            
+            document.getElementById('status-text').textContent = steps[step];
+            
+            const interval = setInterval(() => {
+                step++;
+                if (step < steps.length) {
+                    document.getElementById('status-text').textContent = steps[step];
+                } else {
+                    clearInterval(interval);
+                    status.classList.remove('flex');
+                    status.classList.add('hidden');
+                    
+                    // Actually compute
+                    const report = computeReport(collectedSymptoms, onset, familyStr);
+                    renderResults(report, ageGroup, onset, familyStr);
+                    
+                    content.classList.remove('hidden');
+                    actions.classList.remove('hidden');
+                }
+            }, 620);
+        }
+
+        function computeReport(symptoms, onset, family) {
+            const mapped = symptoms.map(s => {
+                const hit = mapToHPO(s);
+                return hit ? { input: s, ...hit, confidence: "medium" } : { input: s, hpo_id: null, hpo_name: null, confidence: "none" };
+            });
+            
+            const hpoHits = mapped.filter(m => m.hpo_id);
+            
+            const results = DISEASE_KB.map(disease => {
+                let score = 0;
+                const matchedFeats = [];
+                const diseaseFeats = disease.key_hpo_or_features.map(f => f.toLowerCase());
+                
+                mapped.forEach(ms => {
+                    const inp = (ms.input || '').toLowerCase();
+                    if (!inp) return;
+                    diseaseFeats.forEach(feat => {
+                        if (feat.includes(inp) || inp.includes(feat) || (ms.hpo_name && ms.hpo_name.toLowerCase().includes(feat))) {
+                            if (!matchedFeats.includes(ms.input)) {
+                                matchedFeats.push(ms.input);
+                                score += 11;
+                            }
+                        }
+                    });
+                });
+                
+                // critical bonus
+                disease.critical_features.forEach(cf => {
+                    symptoms.forEach(s => {
+                        if (s.toLowerCase().includes(cf.toLowerCase())) score += 13;
+                    });
+                });
+                
+                // onset
+                let onsetB = 0;
+                if (onset && disease.onset_groups) {
+                    const o = onset.toLowerCase();
+                    if (disease.onset_groups.some(og => og.toLowerCase().includes(o) || o.includes(og.toLowerCase()))) {
+                        onsetB = 9;
+                    } else {
+                        onsetB = -4;
+                    }
+                }
+                score += onsetB;
+                
+                // family
+                let famB = 0;
+                if (family === "yes" && (disease.inheritance.includes("隐性") || disease.inheritance.includes("X连锁") || disease.inheritance.includes("XL"))) famB = 7;
+                score += famB;
+                
+                const maxBase = Math.max(60, disease.key_hpo_or_features.length * 11);
+                const pct = Math.max(3, Math.min(98, Math.round((score / maxBase) * 100)));
+                
+                return {
+                    ...disease,
+                    match_pct: pct,
+                    matched_features: matchedFeats.slice(0, 5),
+                    onset_bonus: onsetB,
+                    family_bonus: famB
+                };
+            });
+            
+            results.sort((a, b) => b.match_pct - a.match_pct);
+            
+            return {
+                input_symptoms: symptoms,
+                age_onset: onset,
+                family_history: family,
+                mapped_hpo: hpoHits,
+                top_differentials: results.slice(0, 5),
+                generated_at: new Date().toLocaleString('zh-CN')
+            };
+        }
+
+        function renderResults(report, ageGroup, onset, family) {
+            const container = document.getElementById('results-content');
+            container.innerHTML = '';
+            
+            // Summary header - safe DOM construction (no user data in innerHTML)
+            const summary = document.createElement('div');
+            summary.className = 'mb-5';
+            
+            const headerDiv = document.createElement('div');
+            headerDiv.className = 'flex items-center justify-between';
+            
+            const left = document.createElement('div');
+            const titleSmall = document.createElement('div');
+            titleSmall.className = 'uppercase text-teal-700 text-xs tracking-[1.5px] font-semibold';
+            titleSmall.textContent = '初步筛查结果';
+            const titleMain = document.createElement('div');
+            titleMain.className = 'text-2xl font-semibold tracking-tight mt-0.5';
+            titleMain.textContent = '发现 ';
+            const countSpan = document.createElement('span');
+            countSpan.className = 'text-teal-700';
+            countSpan.textContent = report.mapped_hpo.length;
+            titleMain.appendChild(countSpan);
+            titleMain.appendChild(document.createTextNode(' 个可标准化表型'));
+            left.appendChild(titleSmall);
+            left.appendChild(titleMain);
+            
+            const right = document.createElement('div');
+            right.className = 'text-right text-xs text-slate-500';
+            right.innerHTML = '生成时间<br>';
+            const timeSpan = document.createElement('span');
+            timeSpan.className = 'font-mono';
+            timeSpan.textContent = report.generated_at;
+            right.appendChild(timeSpan);
+            
+            headerDiv.appendChild(left);
+            headerDiv.appendChild(right);
+            summary.appendChild(headerDiv);
+            
+            const metaDiv = document.createElement('div');
+            metaDiv.className = 'mt-3 flex flex-wrap gap-x-2 gap-y-1 text-xs';
+            if (ageGroup) {
+                const ag = document.createElement('div');
+                ag.className = 'px-3 py-0.5 bg-slate-100 rounded-2xl';
+                ag.textContent = '年龄段：' + ageGroup;
+                metaDiv.appendChild(ag);
+            }
+            if (onset) {
+                const os = document.createElement('div');
+                os.className = 'px-3 py-0.5 bg-slate-100 rounded-2xl';
+                os.textContent = '起病：' + onset;
+                metaDiv.appendChild(os);
+            }
+            const fam = document.createElement('div');
+            fam.className = 'px-3 py-0.5 bg-slate-100 rounded-2xl';
+            fam.textContent = '家族史：' + (family === 'yes' ? '阳性' : '未报告/阴性');
+            metaDiv.appendChild(fam);
+            summary.appendChild(metaDiv);
+            
+            container.appendChild(summary);
+            
+            // HPO matched
+            if (report.mapped_hpo.length > 0) {
+                const hpoSection = document.createElement('div');
+                hpoSection.className = 'mb-5';
+                hpoSection.innerHTML = `<div class="font-medium text-sm mb-2 text-slate-600">标准化 HPO / 表型映射</div>`;
+                const tags = document.createElement('div');
+                tags.className = 'flex flex-wrap gap-1.5';
+                report.mapped_hpo.forEach(m => {
+                    const t = document.createElement('div');
+                    t.className = `hpo-tag inline-flex items-center gap-1 px-2.5 py-0.5`;
+                    // Safe: separate text nodes / elements, avoid innerHTML with user data
+                    const inputSpan = document.createElement('span');
+                    inputSpan.textContent = m.input;
+                    const hpoSpan = document.createElement('span');
+                    hpoSpan.className = 'font-mono text-[10px] opacity-60';
+                    hpoSpan.textContent = m.hpo_id ? ` ${m.hpo_id}` : '';
+                    t.appendChild(inputSpan);
+                    if (hpoSpan.textContent) t.appendChild(hpoSpan);
+                    tags.appendChild(t);
+                });
+                hpoSection.appendChild(tags);
+                container.appendChild(hpoSection);
+            }
+            
+            // Differentials
+            const diffHeader = document.createElement('div');
+            diffHeader.className = 'font-medium text-sm mb-2.5 text-slate-600 flex items-center gap-2';
+            diffHeader.innerHTML = `差异诊断排名 <span class="text-[10px] text-slate-400 font-normal">（按表型重叠 + 年龄/家族加权）</span>`;
+            container.appendChild(diffHeader);
+            
+            report.top_differentials.forEach((d, i) => {
+                const card = document.createElement('div');
+                card.className = `result-card medical-card mb-3 bg-white border border-slate-200 rounded-2xl p-4`;
+                
+                const pctColor = d.match_pct > 65 ? 'bg-emerald-500' : (d.match_pct > 40 ? 'bg-amber-500' : 'bg-slate-400');
+                
+                // Safe construction: build structure with createElement, textContent for all variable/user data
+                // Header row
+                const row1 = document.createElement('div');
+                row1.className = 'flex items-start justify-between gap-3';
+                
+                const left1 = document.createElement('div');
+                left1.className = 'flex-1 min-w-0';
+                
+                const nameRow = document.createElement('div');
+                nameRow.className = 'flex items-center gap-x-2';
+                const nameSpan = document.createElement('span');
+                nameSpan.className = 'font-semibold text-lg tracking-tight';
+                nameSpan.textContent = d.name;
+                const catSpan = document.createElement('span');
+                catSpan.className = 'text-xs px-2 py-px bg-slate-100 text-slate-500 rounded-xl font-medium';
+                catSpan.textContent = d.category;
+                nameRow.appendChild(nameSpan);
+                nameRow.appendChild(catSpan);
+                
+                const barRow = document.createElement('div');
+                barRow.className = 'mt-1 flex items-center gap-x-2';
+                const barContainer = document.createElement('div');
+                barContainer.className = 'flex-1 bg-slate-100 rounded h-2 overflow-hidden max-w-[160px]';
+                const bar = document.createElement('div');
+                bar.className = `${pctColor} h-2 rounded match-bar`;
+                bar.style.width = d.match_pct + '%';
+                barContainer.appendChild(bar);
+                const pctSpan = document.createElement('span');
+                pctSpan.className = 'font-semibold tabular-nums text-sm w-9 text-right';
+                pctSpan.textContent = d.match_pct;
+                const pctLabel = document.createElement('span');
+                pctLabel.className = 'font-normal text-slate-400';
+                pctLabel.textContent = '%';
+                pctSpan.appendChild(pctLabel);
+                barRow.appendChild(barContainer);
+                barRow.appendChild(pctSpan);
+                
+                left1.appendChild(nameRow);
+                left1.appendChild(barRow);
+                
+                const right1 = document.createElement('div');
+                right1.className = 'text-right text-xs shrink-0 pt-0.5';
+                const inhSpan = document.createElement('div');
+                inhSpan.className = 'text-emerald-700 font-medium';
+                inhSpan.textContent = d.inheritance;
+                right1.appendChild(inhSpan);
+                
+                row1.appendChild(left1);
+                row1.appendChild(right1);
+                card.appendChild(row1);
+                
+                // Matched features (user data - use textContent)
+                const matchDiv = document.createElement('div');
+                matchDiv.className = 'mt-3 text-xs';
+                const matchLabel = document.createElement('span');
+                matchLabel.className = 'font-medium text-slate-500';
+                matchLabel.textContent = '关键匹配表型：';
+                const matchVal = document.createElement('span');
+                matchVal.className = 'text-slate-700';
+                matchVal.textContent = d.matched_features.length ? d.matched_features.join('、') : '部分重叠';
+                matchDiv.appendChild(matchLabel);
+                matchDiv.appendChild(document.createTextNode(' '));
+                matchDiv.appendChild(matchVal);
+                card.appendChild(matchDiv);
+                
+                // Grid for checks/referral (trusted KB data, but still safe text)
+                const grid = document.createElement('div');
+                grid.className = 'mt-2.5 grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2 text-xs';
+                
+                const col1 = document.createElement('div');
+                const checkLabel = document.createElement('span');
+                checkLabel.className = 'font-medium text-slate-500';
+                checkLabel.textContent = '推荐检查：';
+                col1.appendChild(checkLabel);
+                col1.appendChild(document.createElement('br'));
+                const checkVal = document.createElement('span');
+                checkVal.className = 'text-slate-700 leading-snug';
+                checkVal.textContent = d.recommended_tests;
+                col1.appendChild(checkVal);
+                
+                const col2 = document.createElement('div');
+                const refLabel = document.createElement('span');
+                refLabel.className = 'font-medium text-slate-500';
+                refLabel.textContent = '建议转诊：';
+                col2.appendChild(refLabel);
+                col2.appendChild(document.createElement('br'));
+                const refVal = document.createElement('span');
+                refVal.className = 'text-slate-700';
+                refVal.textContent = d.referral_dept;
+                col2.appendChild(refVal);
+                
+                grid.appendChild(col1);
+                grid.appendChild(col2);
+                card.appendChild(grid);
+                
+                // Red flags (trusted)
+                const flagsDiv = document.createElement('div');
+                flagsDiv.className = 'mt-2 text-xs border-t pt-2 text-slate-600';
+                const flagsLabel = document.createElement('span');
+                flagsLabel.className = 'font-medium';
+                flagsLabel.textContent = '红旗信号：';
+                const flagsVal = document.createTextNode(' ' + d.red_flags);
+                flagsDiv.appendChild(flagsLabel);
+                flagsDiv.appendChild(flagsVal);
+                card.appendChild(flagsDiv);
+                
+                // Next action (trusted)
+                const actionDiv = document.createElement('div');
+                actionDiv.className = 'mt-1 text-[12px] font-medium text-teal-700';
+                actionDiv.textContent = '下一步行动建议：' + d.next_action;
+                card.appendChild(actionDiv);
+                
+                container.appendChild(card);
+            });
+            
+            // Bottom strong disclaimer inside results
+            const disc = document.createElement('div');
+            disc.className = 'disclaimer mt-2 rounded-2xl p-3 text-xs text-red-700';
+            disc.innerHTML = `<strong>再次提醒：</strong>以上为算法辅助的初步筛查结果，仅供参考。罕见病诊断需专业医师多维度评估。请尽快至正规医疗机构就诊，必要时转诊罕见病协作网成员单位（全国419家）。`;
+            container.appendChild(disc);
+            
+            // Store last report for copy / pdf
+            window.__LAST_REPORT__ = { report, ageGroup, onset, family };
+        }
+
+        function copyReportForDoctor() {
+            if (!window.__LAST_REPORT__) return alert('请先完成一次分析');
+            
+            const { report, ageGroup, onset, family } = window.__LAST_REPORT__;
+            
+            let text = `【罕见病初筛智能体 - 给医师的结构化转诊信息】\n`;
+            text += `生成时间：${report.generated_at}\n`;
+            text += `患者年龄段：${ageGroup || '未填'} | 起病：${onset || '未填'} | 家族史：${family === 'yes' ? '阳性' : '未报告'}\n\n`;
+            text += `主要症状/表型：\n${report.input_symptoms.map((s,i)=>`  ${i+1}. ${s}`).join('\n')}\n\n`;
+            text += `标准化表型 (HPO)：\n`;
+            report.mapped_hpo.forEach(m => text += `  • ${m.input} → ${m.hpo_id} (${m.hpo_name})\n`);
+            text += `\n差异诊断建议（Top ${report.top_differentials.length} ）：\n`;
+            
+            report.top_differentials.forEach((d, i) => {
+                text += `\n${i+1}. ${d.name}（匹配度 ${d.match_pct}% ）\n`;
+                text += `   关键匹配：${d.matched_features.join('、') || '部分特征重叠'}\n`;
+                text += `   推荐检查：${d.recommended_tests}\n`;
+                text += `   建议科室：${d.referral_dept}\n`;
+                text += `   行动建议：${d.next_action}\n`;
+            });
+            
+            text += `\n【重要】此为AI辅助初筛，非诊断。请结合临床进行完整评估。\n来源：https://www.hjbxywy.com 罕见病初筛智能体`;
+            
+            navigator.clipboard.writeText(text).then(() => {
+                const btns = document.querySelectorAll('#results-actions button');
+                btns.forEach(b => {
+                    if (b.textContent.includes('复制')) {
+                        const old = b.innerHTML;
+                        b.innerHTML = `<i class="fa-solid fa-check"></i> <span>已复制</span>`;
+                        setTimeout(() => { if (b) b.innerHTML = old; }, 1600);
+                    }
+                });
+            }).catch(() => {
+                // fallback
+                prompt('请手动复制以下内容给医生：', text);
+            });
+        }
+
+        function printReport() {
+            if (!window.__LAST_REPORT__) return alert('请先完成一次分析');
+            // Make sure results visible and trigger print with clean styles
+            window.print();
+        }
+
+        async function downloadPDF() {
+            if (!window.__LAST_REPORT__) return alert('请先完成一次分析');
+            if (!window.jspdf || !window.jspdf.jsPDF) {
+                alert('PDF 生成库加载失败（CDN），请使用“打印 / 保存 PDF”按钮或检查网络后重试。');
+                return;
+            }
+            const { report, ageGroup, onset, family } = window.__LAST_REPORT__;
+            const { jsPDF } = window.jspdf;
+            
+            const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+            const pageW = doc.internal.pageSize.getWidth();
+            let y = 18;
+            
+            // Title
+            doc.setFontSize(16);
+            doc.text('罕见病初筛智能体 - 初步筛查报告', pageW/2, y, { align: 'center' });
+            y += 7;
+            doc.setFontSize(9);
+            doc.text('罕见病寻医问药 (hjbxywy.com)  |  仅供参考 · 非诊断文件', pageW/2, y, { align: 'center' });
+            y += 9;
+            
+            // Meta
+            doc.setFontSize(10);
+            doc.text(`生成时间：${report.generated_at}`, 15, y);
+            y += 5;
+            doc.text(`年龄段：${ageGroup || '-'}    起病阶段：${onset || '-'}    家族史：${family === 'yes' ? '阳性' : '未报告'}`, 15, y);
+            y += 7;
+            
+            doc.text('主要症状/表型：', 15, y);
+            y += 5;
+            report.input_symptoms.forEach((s, i) => {
+                doc.text(`  ${i+1}. ${s}`, 18, y);
+                y += 4.5;
+            });
+            
+            y += 3;
+            doc.text('标准化表型映射：', 15, y);
+            y += 5;
+            report.mapped_hpo.forEach(m => {
+                doc.text(`  • ${m.input} → ${m.hpo_id} (${m.hpo_name})`, 18, y);
+                y += 4.5;
+            });
+            
+            y += 4;
+            doc.setFontSize(11);
+            doc.text('差异诊断（按匹配度排序）', 15, y);
+            y += 6;
+            
+            doc.setFontSize(9);
+            report.top_differentials.forEach((d, idx) => {
+                if (y > 250) {
+                    doc.addPage();
+                    y = 18;
+                }
+                doc.text(`${idx+1}. ${d.name}   匹配度：${d.match_pct}%`, 15, y);
+                y += 5;
+                doc.text(`   关键匹配：${d.matched_features.join('、') || '部分重叠'}`, 15, y);
+                y += 4.5;
+                const testsShort = d.recommended_tests.length > 85 ? d.recommended_tests.slice(0, 82) + '...' : d.recommended_tests;
+                doc.text(`   推荐检查：${testsShort}`, 15, y);
+                y += 4.5;
+                doc.text(`   建议科室：${d.referral_dept}`, 15, y);
+                y += 4.5;
+                doc.text(`   行动：${d.next_action}`, 15, y);
+                y += 6;
+            });
+            
+            y += 4;
+            doc.setFontSize(8);
+            const discLines = doc.splitTextToSize('【重要免责】本报告仅为AI辅助初步筛查结果，基于公开知识库与表型重叠计算得出，不构成医疗诊断或治疗建议。罕见病诊断复杂多变，必须由具备相应资质的医师结合病史、体格、实验室、影像及分子遗传学检测等进行综合判断。请尽快就医，切勿自行诊疗或延误。', pageW - 30);
+            doc.text(discLines, 15, y);
+            
+            y = doc.internal.pageSize.getHeight() - 18;
+            doc.text('来源：https://www.hjbxywy.com | 页面本地计算 · 数据不上传', 15, y);
+            
+            doc.save(`罕见病初筛报告_${new Date().toISOString().slice(0,10)}.pdf`);
+        }
+
+        function loadSampleCase(caseIndex = 0) {
+            // Reset
+            collectedSymptoms = [];
+            document.querySelectorAll('#symptom-chips button').forEach(b => b.classList.remove('active'));
+            
+            let samples = [
+                // SMA infant
+                {
+                    symptoms: ["进行性肌无力", "肌张力低下", "运动发育迟缓", "舌肌纤颤", "呼吸困难"],
+                    age: "婴儿期",
+                    onset: "婴儿期",
+                    family: false
+                },
+                // Gaucher
+                {
+                    symptoms: ["脾肿大", "肝脾肿大", "血小板减少", "贫血", "骨痛"],
+                    age: "儿童期",
+                    onset: "儿童期",
+                    family: false
+                }
+            ];
+            
+            const s = samples[caseIndex] || samples[0];
+            
+            document.getElementById('age-group').value = s.age;
+            document.getElementById('onset-age').value = s.onset;
+            document.getElementById('family-similar').checked = s.family;
+            document.getElementById('consanguinity').checked = false;
+            
+            s.symptoms.forEach(sym => {
+                if (!collectedSymptoms.includes(sym)) collectedSymptoms.push(sym);
+            });
+            
+            // Activate chips
+            document.querySelectorAll('#symptom-chips button').forEach(b => {
+                if (s.symptoms.includes(b.textContent)) b.classList.add('active');
+            });
+            
+            renderCollectedSymptoms();
+            
+            // Auto run after short delay for demo feel
+            setTimeout(() => {
+                runScreeningAnalysis();
+            }, 380);
+        }
+
+        function resetAll(keepInfo = false) {
+            collectedSymptoms = [];
+            document.querySelectorAll('#symptom-chips button').forEach(b => b.classList.remove('active'));
+            renderCollectedSymptoms();
+            
+            document.getElementById('results-content').classList.add('hidden');
+            document.getElementById('results-placeholder').classList.remove('hidden');
+            document.getElementById('results-actions').classList.add('hidden');
+            document.getElementById('analysis-status').classList.remove('flex');
+            document.getElementById('analysis-status').classList.add('hidden');
+            
+            if (!keepInfo) {
+                document.getElementById('age-group').value = '';
+                document.getElementById('onset-age').value = '';
+                document.getElementById('family-similar').checked = false;
+                document.getElementById('consanguinity').checked = false;
+            }
+            
+            window.__LAST_REPORT__ = null;
+        }
+
+        function showHelpModal() {
+            document.getElementById('help-modal').classList.remove('hidden');
+            document.getElementById('help-modal').classList.add('flex');
+        }
+        function hideHelpModal() {
+            const m = document.getElementById('help-modal');
+            m.classList.remove('flex');
+            m.classList.add('hidden');
+        }
+
+        function init() {
+            initTailwind();
+            initSymptomChips();
+            renderCollectedSymptoms();
+            
+            // Keyboard support for symptom input
+            const input = document.getElementById('symptom-input');
+            input.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    addFreeTextSymptom();
+                }
+            });
+            
+            // Nice default hint
+            setTimeout(() => {
+                const ph = document.getElementById('results-placeholder');
+                if (ph && !ph.classList.contains('hidden')) {
+                    // already has good content
+                }
+            }, 1200);
+            
+            // Expose for console debug / future
+            window.HJBX_CHUSHAI = { loadSampleCase, runScreeningAnalysis, resetAll };
+            
+            // Boot with gentle prompt (optional)
+            // console.log('%c[初筛智能体] 已就绪。可在控制台使用 window.HJBX_CHUSHAI 调试', 'color:#64748b');
+        }
+
+        // Boot
+        window.addEventListener('DOMContentLoaded', init);
+    </script>
+</body>
+</html>

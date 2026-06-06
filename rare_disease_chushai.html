@@ -110,6 +110,11 @@
             background-color: #ffffff;
         }
 
+        /* Embed 模式：隐藏导航/页脚，紧凑布局，兼容网站原有样式（可通过站点 CSS 覆盖） */
+        .embed-mode .nav, .embed-mode footer, .embed-mode .no-print { display: none !important; }
+        .embed-mode .medical-card { box-shadow: none; border: 1px solid #e5e7eb; }
+        .embed-mode { font-size: 14px; }
+
         @media print {
             .no-print { display: none !important; }
             .print-only { display: block !important; }
@@ -265,7 +270,18 @@
                             <option value="进行性">进行性 / 逐渐出现</option>
                         </select>
                     </div>
-                    
+
+                    <!-- 任务类型（决定后台模型路由；模型切换由后端固化，前端不曝露选择） -->
+                    <div class="mt-4">
+                        <label class="block text-xs font-medium text-slate-500 mb-1.5">咨询类型</label>
+                        <select id="task-type" class="w-full rounded-2xl border border-slate-200 bg-white px-3 py-2.5 text-sm focus:outline-none focus:border-teal-700 focus:ring-2 focus:ring-offset-1 focus:ring-teal-700" onchange="updateInputForTask()">
+                            <option value="screening">初步筛查 / 问诊</option>
+                            <option value="medication">用药建议</option>
+                            <option value="lab_parse">化验单解析</option>
+                        </select>
+                        <div class="text-[10px] text-slate-500 mt-1">系统会按咨询类型自动选用最合适的智能分析引擎。</div>
+                    </div>
+
                     <div class="mt-4">
                         <label class="block text-xs font-medium text-slate-500 mb-1.5">家族史与遗传风险</label>
                         <div class="flex flex-wrap gap-2">
@@ -279,6 +295,7 @@
                             </label>
                         </div>
                     </div>
+
                 </div>
 
                 <!-- Symptom Input -->
@@ -333,6 +350,10 @@
                             class="flex-1 h-14 bg-teal-700 hover:bg-teal-800 active:bg-teal-900 transition-all text-white rounded-3xl font-semibold text-base flex items-center justify-center gap-x-2 shadow-lg shadow-teal-900/20">
                         <i class="fa-solid fa-brain"></i>
                         <span>启动智能分析</span>
+                    </button>
+                    <button onclick="refreshKB()" 
+                            class="h-14 px-4 border border-slate-300 hover:bg-white rounded-3xl text-sm font-medium flex items-center gap-x-2 transition-colors" title="从OSS刷新知识库">
+                        <i class="fa-solid fa-sync"></i>
                     </button>
                     <button onclick="resetAll()" 
                             class="h-14 px-6 border border-slate-300 hover:bg-white rounded-3xl text-sm font-medium flex items-center gap-x-2 transition-colors">
@@ -453,7 +474,7 @@
                 </div>
                 <div>
                     <strong class="text-slate-800">2. 症状输入</strong><br>
-                    点击常用表型标签快速添加，或在文本框用自然语言描述（例如“婴儿期进行性无力、舌震颤”），系统会自动映射到临床表型。
+                    点击常用表型标签快速添加，或在文本框用自然语言描述（例如“婴儿期进行性无力、舌震抗”），系统会自动映射到临床表型。
                 </div>
                 <div>
                     <strong class="text-slate-800">3. 分析结果</strong><br>
@@ -476,26 +497,93 @@
             // Tailwind already loaded via CDN, runtime config optional
         }
 
+        // ========== DeepSeek + Aliyun OSS 配置（生产部署时修改） ==========
+        const CONFIG = {
+          // 复用站点现有 OSS（知识库 + 抓取归档，无新增资源）
+          OSS_KB_URL: 'https://your-existing-oss-domain/rare-disease-kb/diseases-kb.json',
+          // 同目录静态全量库（覆盖207种）：与 index.html 一起部署时自动作为离线兜底
+          LOCAL_KB_URL: './diseases-kb.json',
+          // 后端接口服务（部署在现有 ECS，适配网站跨域）
+          BACKEND_ANALYZE_URL: '', // 例如 'https://www.hjbxywy.com/api/screening/analyze' 或内网
+          ENABLE_DEEPSEEK: true
+        };
+
+        // 站点用户体系：前端透传 userId+token（绑定问诊记录到站点账号）
+        // 来源优先级：URL 参数(?uid=&token=) > 父页面 postMessage > 空(匿名)
+        const SITE_USER = { userId: '', token: '' };
+        (function initSiteUser() {
+          const q = new URLSearchParams(window.location.search);
+          SITE_USER.userId = q.get('uid') || q.get('userId') || '';
+          SITE_USER.token = q.get('token') || q.get('userToken') || '';
+          // iframe 嵌入时，父页面可 postMessage({type:'hjbxywy-user', userId, token})
+          window.addEventListener('message', (e) => {
+            const d = e.data || {};
+            if (d && d.type === 'hjbxywy-user') {
+              if (d.userId) SITE_USER.userId = String(d.userId);
+              if (d.token) SITE_USER.token = String(d.token);
+            }
+          });
+        })();
+
+        // Embed 模式适配（?embed=1 时隐藏部分导航，兼容网站原有样式）
+        if (new URLSearchParams(window.location.search).get('embed')) {
+          document.documentElement.classList.add('embed-mode');
+        }
+
+        // 页面加载时根据咨询类型初始化输入提示（模型路由由后台决定，前端无切换）
+        window.addEventListener('load', () => {
+          updateInputForTask();
+        });
+
+        let dynamicKB = null;
+
+        async function loadKBFromOSS() {
+          if (dynamicKB) return dynamicKB;
+          // 1) 优先 OSS 最新全量库（207种）
+          try {
+            const res = await fetch(CONFIG.OSS_KB_URL, { cache: 'no-store' });
+            if (!res.ok) throw new Error('OSS KB加载失败');
+            dynamicKB = await res.json();
+            console.log('[OSS] KB loaded, count:', dynamicKB.length || 'N/A');
+            return dynamicKB;
+          } catch (e) {
+            console.warn('[OSS] fallback to local diseases-kb.json', e);
+          }
+          // 2) 同目录静态全量库（静态/离线部署时覆盖 207 种）
+          try {
+            const res = await fetch(CONFIG.LOCAL_KB_URL, { cache: 'no-store' });
+            if (res.ok) {
+              dynamicKB = await res.json();
+              console.log('[LOCAL] KB loaded from', CONFIG.LOCAL_KB_URL, 'count:', dynamicKB.length || 'N/A');
+              return dynamicKB;
+            }
+          } catch (e) {
+            console.warn('[LOCAL] fallback to embedded KB', e);
+          }
+          // 3) 最后兜底：内嵌精简库（仅核心数种，保证极端离线仍可用）
+          return DISEASE_KB;
+        }
+
         // Embedded Disease Knowledge Base (subset of diseases-kb.json for standalone)
         const DISEASE_KB = [
-            {"id":"sma","name":"脊髓性肌缩缩症 (SMA)","category":"神经肌肉病","inheritance":"常染色体隐性 (AR)","prevalence":"约 1/6,000 - 1/10,000 活产儿","onset_groups":[" 新生儿期","婴儿期","儿童期","青少年","青少年/成年","成年","成人","青少年期","成年期"],"key_hpo_or_features":[" 进行性肌无力","肌张力低下","运动发育迟缓","舌肌纤颤","呼吸困难","吞咽困难","近端肌无力为主"],"critical_features":[" 进行性肌无力","舌肌纤颤"],"typical_onset":"婴儿期（I型最常见）","recommended_tests":"SMN1 基因检测（外显子7纯合缺失或复合杂合）、SMN2 拷贝数分析、肌电图","referral_dept":"神经内科（神经肌肉专科） / 儿科神经科 / 罕见病多学科团队","short_desc":"SMN1 基因突变导致脊髓前角运动神经元退化，进行性、对称性肌无力和缩缩。早期诊断 + 疾病修正治疗（基因疗法、ASO、SMN增强剂）可显著改善运动功能与生存。","red_flags":"婴儿期进行性无力、不能独坐、舌震颤、呼吸浅快；儿童期进行性行走困难后喪失","next_action":"立即转诊神经肌肉专科，争取早期治疗窗口"},
-            {"id":"gaucher","name":"戈谢病 (Gaucher Disease)","category":"溶齿体存积病 / 代谢病","inheritance":"常染色体隐性 (AR)","prevalence":"中国人群约 1/50万 - 1/20万（Ⅰ型为主）","onset_groups":[" 婴儿期","儿童期","青少年","成年"],"key_hpo_or_features":[" 脾肿大","肝肿大","肝脾肿大","血小板减少","贫血","骨痛","骨危象","病理性骨折"],"critical_features":[" 脾肿大","肝脾肿大","血小板减少"],"typical_onset":"儿童期或成年（Ⅰ型）","recommended_tests":"白细胞或成纳维细胞 β-葡萄糖脑菜苷脂酶活性测定、GBA 基因检测、骨髓戈谢细胞（辅助）、血清酸性磷酸酶、生物标志物 Lyso-GL1","referral_dept":"儿科 / 血液内科 / 消化内科 / 遗传代谢病专科 / 罕见病MDT","short_desc":"GBA 基因突变导致葡萄糖脑菜苷脂在巨嗡细胞溶齿体存积。典型表现肝脾肿大、血液学异常、骨骼受累。酶替代治疗（ERT）和底物减少疗法（SRT）有效。","red_flags":"不明原因巨脾 + 血小板减少 + 骨痛/骨折；儿童生长迟缓","next_action":"转诊代谢病或血液专科，尽早酶活性筛查"},
-            {"id":"wilson","name":"肝豆状核变性 (Wilson Disease / 威尔逊病)","category":"金属代谢病 / 肝病","inheritance":"常染色体隐性 (AR)","prevalence":"约 1/30,000 - 1/100,000","onset_groups":[" 儿童期","青少年","成年"],"key_hpo_or_features":[" 肝功能异常","肝硬化","黄疸","震颤","肌张力障碍","构音障碍","精神行为异常","角膜K-F环"],"critical_features":[" 肝病","锥体外系症状","K-F环"],"typical_onset":"5-35岁（肝型儿童多见，神经型青少年/成人）","recommended_tests":"血清铜蓝蛋白、血清铜、 24h尿铜、肝铜定量、ATP7B 基因检测、裂隙灯查K-F环、脑MRI（基底节信号异常）","referral_dept":"消化内科 / 神经内科 / 肝病专科 / 儿科 / 遗传代谢","short_desc":"ATP7B 突变导致铜排泄障碍，铜沉积于肝、脑、角膜等。早期青霍胺或锌剂治疗可防止致命并发症；晚期需肝移植。","red_flags":"青少年不明原因肝病 + 神经精神症状；家族有类似肝/神经病史","next_action":"急诊/专科评估铜代谢指标，尽早治疗可正常寿命"},
-            {"id":"pompe","name":"庞贝病 (Pompe Disease / 糖原存积病Ⅱ型)","category":"溶齿体存积病 / 神经肌肉 / 心肚病","inheritance":"常染色体隐性 (AR)","prevalence":"约 1/40,000","onset_groups":[" 新生儿期","婴儿期","儿童期","青少年","成年","成人","青少年期","成年期","成年（晚发型）"],"key_hpo_or_features":[" 肌无力","肌张力低下","呼吸困难","心肚肿厚","喂养困难","发育迟缓","运动里程碑延迟"],"critical_features":[" 进行性肌无力","呼吸衰竭","心肚病（婴儿型）"],"typical_onset":"婴儿型（经典）<1岁；晚发型儿童或成人","recommended_tests":"酸性α-葡萄糖苷酯 (GAA) 活性（干血片筛查/确诊）、GAA 基因检测、心超、肌酶、呼吸功能、肌肉活检（糖原累积）","referral_dept":"儿科神经/心血管 / 神经内科 / 呼吸内科 / 代谢病专科","short_desc":"GAA 缺乏导致溶齿体糖原在心肚、骨骼肌、神经等蓄积。婴儿型进展迅速致命；晚发型主要呼吸和肢带肌无力。酶替代治疗（ERT）可改善。","red_flags":"婴儿肥厚性心肚病 + 肌无力；儿童/成人进行性呼吸困难 + 近端肌无力","next_action":"转诊代谢或神经肌肉专科，干血片 GAA 筛查快速"},
-            {"id":"fabry","name":"法布里病 (Fabry Disease)","category":"溶齿体存积病 / 心肾 / 神经","inheritance":"X连锁 (XL)","prevalence":"约 1/40,000 - 1/117,000（男性为主，女性杂合子也可发病）","onset_groups":[" 儿童期","青少年","成年"],"key_hpo_or_features":[" 肢端疼痛","痛性感觉异常","血管角屈瘤","少汗或无汗","蛋白尿","肾功能不全","心肚肿厚","年轻央中"],"critical_features":[" 肢端烧烤痛","血管角屈瘤","肾脏受累"],"typical_onset":"儿童期疼痛，成年后心肾表现","recommended_tests":"α-半乳糖苷酯A 活性（男性）、GLA 基因检测、血浆 Lyso-Gb3、肾活检、心超/心脏MRI、角膜/皮肤检查","referral_dept":"肾内科 / 心内科 / 神经内科 / 皮肤科 / 遗传代谢 / 儿科","short_desc":"GLA 突变导致糖鞘脂 Gb3 蓄积。男性多重症，女性变异大。早期 ERT 或口服药物可延缓心肾脑并发症。","red_flags":"儿童不明原因肢端疼 + 少汗 + 皮肤血管角屈瘤；家族年轻肾衰/心肚病/央中史","next_action":"转诊肾内/心内或代谢专科，酶活性+基因确诊"},
-            {"id":"dmd","name":"杜氏肌营养不良症 (Duchenne Muscular Dystrophy, DMD)","category":"神经肌肉病 / 肌营养不良","inheritance":"X连锁 (XL)（男性为主）","prevalence":"约 1/3,500 - 1/5,000 男性活产","onset_groups":[" 儿童期","儿童期（2-5岁常见）","儿童","幼儿"],"key_hpo_or_features":[" 进行性肌无力","Gowers征","脑肠肌假性肿大","运动发育迟缓","血清CK显著升高","心肚病","呼吸功能下降"],"critical_features":[" 进行性近端肌无力","Gowers征","假性肿大"],"typical_onset":"2-5岁出现症状，10岁左右喪失行走","recommended_tests":"血清CK、DMD 基因检测（缺失/重复或测序）、肌肉活检（抗肌缩缩蛋白缺失）、心超/心电、呼吸监测","referral_dept":"儿科神经 / 神经内科（神经肌肉） / 康复科 / 心内科","short_desc":"DMD 基因突变导致抗肌缩缩蛋登缺失，进行性骨骼肌、心肚、呼吸肌变性。激素治疗 + 心脏管理 + 新兴基因疗法/外显子跳跃可延缓进展。","red_flags":"男孩 3-5岁行走困难、从地起立困难（Gowers）、跑跳异常、脑肠肌大而硬","next_action":"儿科神经肌肉专科基因检测，尽早干预"},
-            {"id":"mps1","name":"黏多糖存积症Ⅰ型 (MPS I, Hurler / Hurler-Scheie 综合征)","category":"溶齿体存积病 / 骨骼 / 发育","inheritance":"常染色体隐性 (AR)","prevalence":"约 1/100,000","onset_groups":[" 婴儿期","儿童期"],"key_hpo_or_features":[" 粗糙面容","肝脾肿大","骨骼发育异常","关节僵硬","发育迟缓","角膜混浊","心脏瓣膜病","呼吸道桷阻"],"critical_features":[" 特殊面容","肝脾肿大","骨骼畸形","发育迟缓"],"typical_onset":"Hurler 重型 6-12月起病；Scheie 轻型较晚","recommended_tests":"尿糖胺聚糖 (GAG) 定量、α-L-艾杜糖醛酸苷酯活性、IDUA 基因检测、骨骼X线、超声心动、眼科、肺功能","referral_dept":"儿科遗传代谢 / 骨科 / 心内科 / 耳鼻喉 / 眼科 / 康复","short_desc":"IDUA 缺乏导致糖胺聚糖蓄积。多系统进行性损害（骨骼、脏器、神经）。酶替代 + 造血干细胞移植（重型早期）是主要治疗。","red_flags":"婴儿期进行性粗面容 + 肝脾大 + 生长迟缓 + 关节活动受限","next_action":"代谢病专科评估，尽早 ERT/移植窗口"},
-            {"id":"pku","name":"苯丙酮尿症 (Phenylketonuria, PKU)","category":"氨基酸代谢病","inheritance":"常染色体隐性 (AR)","prevalence":"中国约 1/10,000 - 1/15,000 新生儿","onset_groups":[" 新生儿期（筛查发现）","婴儿期（未经治疗）"],"key_hpo_or_features":[" 智力障碍","发育迟缓","媛痫","行为问题","皮肤色素减退","鼠尿味","小头畸形"],"critical_features":[" 未经治疗的智力发育落后","媛痫"],"typical_onset":"出生后数月出现神经症状（若未筛查）","recommended_tests":"新生儿筛查血 Phe 浓度、PAH 基因检测、血氨基酸谱、尿有机酸","referral_dept":"儿科内分泌/代谢 / 神经内科 / 营养科","short_desc":"PAH 缺乏导致苯丙氨酸蓄积。早期低苯丙氨酸饮食治疗可使智力发育正常；晚发现则不可逆智力残疾。","red_flags":"新生儿筛查阳性；未经筛查婴儿智力倒退 + 特殊气味 + 皮肤白","next_action":"立即转诊代谢病专科，开始严格饮食管理"}
+            {"id":"sma","name":"脊髓性肌萎缩症 (SMA)","category":"神经肌肉病","inheritance":"常染色体隐性 (AR)","prevalence":"约 1/6,000 - 1/10,000 活产儿","onset_groups":["新生儿期","婴儿期","儿童期","青少年","青少年/成人","成年","成人","青少年期","成年期"],"key_hpo_or_features":["进行性肌无力","肌张力低下","运动发育迟缓","舌肌纤颤","呼吸困难","吞咽困难","近端肌无力为主"],"critical_features":["进行性肌无力","舌肌纤颤"],"typical_onset":"婴儿期（I型最常见）","recommended_tests":"SMN1 基因检测（外显子7纯合缺失或复合杂合）、SMN2 拷贝数分析、肌电图","referral_dept":"神经内科（神经肌肉专科） / 儿科神经科 / 罕见病多学科团队","short_desc":"SMN1 基因突变导致脊髓前角运动神经元退化，进行性、对称性肌无力和萎缩。早期诊断 + 病病修正治疗（基因疗法、ASO、SMN增强剂）可显著改善运动功能与生存。","red_flags":"婴儿期进行性无力、不能独坐、舌震抗、呼吸浅快；儿童期进行性行走困难后喪失","next_action":"立即转诊神经肌肉专科，争取早期治疗窗口"},
+            {"id":"gaucher","name":"戈谢病 (Gaucher Disease)","category":"溶齿体储积病 / 代谢病","inheritance":"常染色体隐性 (AR)","prevalence":"中国人群约 1/50万 - 1/20万（Ⅰ型为主）","onset_groups":["婴儿期","儿童期","青少年","成年"],"key_hpo_or_features":["脾肿大","肝肿大","肝脾肿大","血小板减少","贫血","骨痛","骨危象","病理性骨折"],"critical_features":["脾肿大","肝脾肿大","血小板减少"],"typical_onset":"儿童期或成年（Ⅰ型）","recommended_tests":"白细胞或成纤维细胞 β-葡萄糖脑苷脂酶活性测定、GBA 基因检测、骨髓戈谢细胞（辅助）、血清酸性磷酸酶、生物标志物 Lyso-GL1","referral_dept":"儿科 / 血液内科 / 消化内科 / 遗传代谢病专科 / 罕见病MDT","short_desc":"GBA 基因突变导致葡萄糖脑苷脂在巨哺细胞溶齿体储积。典型表现肝脾肿大、血液学异常、骨骼受累。酶替代治疗（ERT）和底物减少疗法（SRT）有效。","red_flags":"不明原因巨脾 + 血小板减少 + 骨痛/骨折；儿童生长迟缓","next_action":"转诊代谢病或血液专科，尽早酶活性筛查"},
+            {"id":"wilson","name":"肝豆状核变性 (Wilson Disease / 威尔逊病)","category":"金属代谢病 / 肝病","inheritance":"常染色体隐性 (AR)","prevalence":"约 1/30,000 - 1/100,000","onset_groups":["儿童期","青少年","成年"],"key_hpo_or_features":["肝功能异常","肝硬化","黄疸","震抗","肌张力障碍","构音障碍","精神行为异常","角膜K-F环"],"critical_features":["肝病","锥体外系症状","K-F环"],"typical_onset":"5-35岁（肝型儿童多见，神经型青少年/成人）","recommended_tests":"血清铜蓝蛋白、血清铜、24h尿铜、肝铜定量、ATP7B 基因检测、裂隙灯查K-F环、脑MRI（基底节信号异常）","referral_dept":"消化内科 / 神经内科 / 肝病专科 / 儿科 / 遗传代谢","short_desc":"ATP7B 突变导致铜排泄障碍，铜沉积于肝、脑、角膜等。早期青霉胼胼或锌剂治疗可防止致命并发症；晚期需肝移植。","red_flags":"青少年不明原因肝病 + 神经精神症状；家族有类似肝/神经病史","next_action":"急诊/专科评估铜代谢指标，尽早治疗可正常寿命"},
+            {"id":"pompe","name":"庞贝病 (Pompe Disease / 糖原储积病Ⅱ型)","category":"溶齿体储积病 / 神经肌肉 / 心脂病","inheritance":"常染色体隐性 (AR)","prevalence":"约 1/40,000","onset_groups":["新生儿期","婴儿期","儿童期","青少年","成年","成人","青少年期","成年期","成年（晚发型）"],"key_hpo_or_features":["肌无力","肌张力低下","呼吸困难","心脂肿厚","喂养困难","发育迟缓","运动里程碑延迟"],"critical_features":["进行性肌无力","呼吸衰竭","心脂病（婴儿型）"],"typical_onset":"婴儿型（经典）<1岁；晚发型儿童或成人","recommended_tests":"酸性α-葡萄糖苷酯 (GAA) 活性（干血片筛查/确诊）、GAA 基因检测、心超、肌酶、呼吸功能、肌肉活检（糖原累积）","referral_dept":"儿科神经/心血管 / 神经内科 / 呼吸内科 / 代谢病专科","short_desc":"GAA 缺乏导致溶齿体糖原在心脂、骨骼肌、神经等蓄积。婴儿型进展迅速致命；晚发型主要呼吸和肢带肌无力。酶替代治疗（ERT）可改善。","red_flags":"婴儿肥厚性心脂病 + 肌无力；儿童/成人进行性呼吸困难 + 近端肌无力","next_action":"转诊代谢或神经肌肉专科，干血片 GAA 筛查快速"},
+            {"id":"fabry","name":"法布里病 (Fabry Disease)","category":"溶齿体储积病 / 心肾 / 神经","inheritance":"X连锁 (XL)","prevalence":"约 1/40,000 - 1/117,000（男性为主，女性杂合子也可发病）","onset_groups":["儿童期","青少年","成年"],"key_hpo_or_features":["肢端疼痛","痛性感觉异常","血管角痤瘤","少汗或无汗","蛋白尿","肾功能不全","心脂肿厚","年轻子中"],"critical_features":["肢端烧烤痛","血管角痤瘤","肾脏受累"],"typical_onset":"儿童期疼痛，成年后心肾表现","recommended_tests":"α-半乳糖苷酯酶A 活性（男性）、GLA 基因检测、血浆 Lyso-Gb3、肾活检、心超/心脂MRI、角膜/皮肤检查","referral_dept":"肾内科 / 心内科 / 神经内科 / 皮肤科 / 遗传代谢 / 儿科","short_desc":"GLA 突变导致糖鞞脂 Gb3 蓄积。男性多重症，女性变异大。早期 ERT 或口服药物可延缓心肾脑并发症。","red_flags":"儿童不明原因肢端痛 + 少汗 + 皮肤血管角痤瘤；家族年轻肾衰/心脂病/子中史","next_action":"转诊肾内/心内或代谢专科，酶活性+基因确诊"},
+            {"id":"dmd","name":"杜氏肌营养不良症 (Duchenne Muscular Dystrophy, DMD)","category":"神经肌肉病 / 肌营养不良","inheritance":"X连锁 (XL)（男性为主）","prevalence":"约 1/3,500 - 1/5,000 男性活产","onset_groups":["儿童期","儿童期（2-5岁常见）","儿童","幼儿"],"key_hpo_or_features":["进行性肌无力","Gowers征","脛肠肌假性肿大","运动发育迟缓","血清CK显著升高","心脂病","呼吸功能下降"],"critical_features":["进行性近端肌无力","Gowers征","假性肿大"],"typical_onset":"2-5岁出现症状，10岁左右喪失行走","recommended_tests":"血清CK、DMD 基因检测（缺失/重复或测序）、肌肉活检（抗肌萎缩蛋白缺失）、心超/心电、呼吸监测","referral_dept":"儿科神经 / 神经内科（神经肌肉） / 康复科 / 心内科","short_desc":"DMD 基因突变导致抗肌萎缩蛋白缺失，进行性骨骼肌、心脂、呼吸肌变性。激素治疗 + 心脂管理 + 新兴基因疗法/外显子跳跃可延缓进展。","red_flags":"男孩 3-5岁行走困难、从地起立困难（Gowers）、跑跳异常、脛肠肌大而硬","next_action":"儿科神经肌肉专科基因检测，尽早干预"},
+            {"id":"mps1","name":"黏多糖储积症Ⅰ型 (MPS I, Hurler / Hurler-Scheie 综合征)","category":"溶齿体储积病 / 骨骼 / 发育","inheritance":"常染色体隐性 (AR)","prevalence":"约 1/100,000","onset_groups":["婴儿期","儿童期"],"key_hpo_or_features":["粗糙面容","肝脾肿大","骨骼发育异常","关节僵硬","发育迟缓","角膜混浊","心脏瓣膜病","呼吸道捂阻"],"critical_features":["特殊面容","肝脾肿大","骨骼異形","发育迟缓"],"typical_onset":"Hurler 重型 6-12月起病；Scheie 轻型较晚","recommended_tests":"尿糖胺聚糖 (GAG) 定量、α-L-艾杜糖氨酸苷酯活性、IDUA 基因检测、骨骼X线、超声心动、眼科、肺功能","referral_dept":"儿科遗传代谢 / 骨科 / 心内科 / 耳鼻喉 / 眼科 / 康复","short_desc":"IDUA 缺乏导致糖胺聚糖储积。多系统进行性损害（骨骼、脏器、神经）。酶替代 + 造血干细胞移植（重型早期）是主要治疗。","red_flags":"婴儿期进行性粗面容 + 肝脾大 + 生长迟缓 + 关节活动受限","next_action":"代谢病专科评估，尽早 ERT/移植窗口"},
+            {"id":"pku","name":"芬氧酮尿症 (Phenylketonuria, PKU)","category":"氨基酸代谢病","inheritance":"常染色体隐性 (AR)","prevalence":"中国约 1/10,000 - 1/15,000 新生儿","onset_groups":["新生儿期（筛查发现）","婴儿期（未经治疗）"],"key_hpo_or_features":["智力障碍","发育迟缓","痫痫","行为问题","皮肤色素减退","鼠尿味","小头異形"],"critical_features":["未经治疗的智力发育落后","痫痫"],"typical_onset":"出生后数月出现神经症状（若未筛查）","recommended_tests":"新生儿筛查血 Phe 浓度、PAH 基因检测、血氨基酸谱、尿有机酸","referral_dept":"儿科内分泌/代谢 / 神经内科 / 营养科","short_desc":"PAH 缺乏导致芬氧氨酸蓄积。早期低芬氧氨酸饮食治疗可使智力发育正常；晚发现则不可逆智力残疾。","red_flags":"新生儿筛查阳性；未经筛查婴儿智力倒退 + 特殊气味 + 皮肤白","next_action":"立即转诊代谢病专科，开始严格饮食管理"}
         ];
 
         // Common symptom chips (Chinese clinical phenotypes)
         const COMMON_SYMPTOM_CHIPS = [
             "进行性肌无力", "肌张力低下", "运动发育迟缓", "舌肌纤颤",
             "呼吸困难", "吞咽困难", "脾肿大", "肝脾肿大", "血小板减少",
-            "贫血", "骨痛", "肝功能异常", "震颤", "肌张力障碍", "构音障碍",
-            "精神行为异常", "角膜K-F环", "心肚肿厚", "肢端疼痛", "血管角屈瘤",
-            "Gowers征", "脑肠肌假性肿大", "特殊面容", "关节僵硬", "角膜混浊",
-            "智力障碍", "媛痫", "发育迟缓", "共浊失调"
+            "贫血", "骨痛", "肝功能异常", "震抗", "肌张力障碍", "构音障碍",
+            "精神行为异常", "角膜K-F环", "心脂肿厚", "肢端疼痛", "血管角痤瘤",
+            "Gowers征", "脛肠肌假性肿大", "特殊面容", "关节僵硬", "角膜混浊",
+            "智力障碍", "痫痫", "发育迟缓", "共浊失调"
         ];
 
         let collectedSymptoms = [];
@@ -534,7 +622,7 @@
             if (!val) return;
 
             // Split by common separators + basic caps for safety (prevent DoS / huge DOM)
-            const parts = val.split(/[\uff0c,\u3001\u3002.\n]/).map(s => s.trim()).filter(Boolean);
+            const parts = val.split(/[，,、。.\n]/).map(s => s.trim()).filter(Boolean);
             const MAX_SYMPTOMS = 25;
             const MAX_LEN = 200;
             
@@ -601,7 +689,7 @@
                 '肌张力低': '肌张力低下', '低肌张力': '肌张力低下',
                 '无力': '肌无力', '肝脾大': '肝脾肿大',
                 '脾大': '脾肿大', '肝大': '肝肿大',
-                '发育落后': '发育迟缓', '抽风': '媛痫', '惊厥': '媛痫'
+                '发育落后': '发育迟缓', '抽风': '痫痫', '惊厥': '痫痫'
             };
             Object.keys(map).forEach(k => {
                 if (t.includes(k)) t = t.replace(k, map[k]);
@@ -616,18 +704,18 @@
                 "HP:0001252": {name: "Hypotonia", matches: ["肌张力低下", "低张力", "hypotonia"]},
                 "HP:0003324": {name: "Generalized muscle weakness", matches: ["肌无力", "进行性肌无力", "weakness"]},
                 "HP:0001263": {name: "Global developmental delay", matches: ["发育迟缓", "发育落后", "运动发育迟缓", "gdd"]},
-                "HP:0001250": {name: "Seizure", matches: ["媛痫", "抽掻", "发作", "seizure"]},
+                "HP:0001250": {name: "Seizure", matches: ["痫痫", "抽掻", "发作", "seizure"]},
                 "HP:0002240": {name: "Splenomegaly", matches: ["脾肿大", "脾大", "巨脾"]},
                 "HP:0001433": {name: "Hepatomegaly", matches: ["肝肿大", "肝大"]},
                 "HP:0003271": {name: "Hepatosplenomegaly", matches: ["肝脾肿大", "肝脾大"]},
                 "HP:0001873": {name: "Thrombocytopenia", matches: ["血小板减少", "血小板低"]},
                 "HP:0001903": {name: "Anemia", matches: ["贫血"]},
-                "HP:0001638": {name: "Cardiomyopathy", matches: ["心肚病", "心肚肿厚"]},
+                "HP:0001638": {name: "Cardiomyopathy", matches: ["心脂病", "心脂肿厚"]},
                 "HP:0001999": {name: "Abnormal facial shape", matches: ["特殊面容", "面容粗糙"]},
                 "HP:0001249": {name: "Intellectual disability", matches: ["智力障碍", "智力低下"]},
                 "HP:0002093": {name: "Respiratory insufficiency", matches: ["呼吸困难", "呼吸衰竭"]},
                 "HP:0002015": {name: "Dysphagia", matches: ["吞咽困难"]},
-                "HP:0001337": {name: "Tremor", matches: ["震颤", "手抖"]},
+                "HP:0001337": {name: "Tremor", matches: ["震抗", "手抖"]},
                 "HP:0001332": {name: "Dystonia", matches: ["肌张力障碍"]},
             };
             
@@ -644,7 +732,7 @@
             return null;
         }
 
-        function runScreeningAnalysis() {
+        async function runScreeningAnalysis() {
             if (collectedSymptoms.length === 0) {
                 const ph = document.getElementById('results-placeholder');
                 if (ph) {
@@ -663,52 +751,114 @@
                 }
                 return;
             }
-            
+
             const status = document.getElementById('analysis-status');
             const placeholder = document.getElementById('results-placeholder');
             const content = document.getElementById('results-content');
             const actions = document.getElementById('results-actions');
-            
+
             status.classList.remove('hidden');
             status.classList.add('flex');
             placeholder.classList.add('hidden');
             content.classList.add('hidden');
             actions.classList.add('hidden');
-            
+
             const ageGroup = document.getElementById('age-group').value;
             const onset = document.getElementById('onset-age').value || ageGroup;
             const familySimilar = document.getElementById('family-similar').checked;
             const consang = document.getElementById('consanguinity').checked;
             const familyStr = (familySimilar || consang) ? "yes" : "no";
-            
-            // Simulate agent thinking steps
-            let step = 0;
-            const steps = [
-                "正在标准化输入表型并映射 HPO 术语...",
-                "正在比对 8 种重点罕见病知识库（含遗传模式与关键表型）...",
-                "计算匹配度、年龄并合度及家族史加权分数...",
-                "生成可解释差异诊断与推荐行动..."
-            ];
-            
-            document.getElementById('status-text').textContent = steps[step];
-            
-            const interval = setInterval(() => {
-                step++;
-                if (step < steps.length) {
-                    document.getElementById('status-text').textContent = steps[step];
-                } else {
-                    clearInterval(interval);
+
+            try {
+                // 尝试从OSS加载最新KB
+                await loadKBFromOSS();
+
+                const useBackend = CONFIG.BACKEND_ANALYZE_URL && CONFIG.ENABLE_DEEPSEEK;
+                if (useBackend) {
+                    // 增强模式：模型由后台按 task_type 固化路由（前端不传 provider、不曝露切换）
+                    const taskType = document.getElementById('task-type')?.value || 'screening';
+                    const payload = {
+                        symptoms: collectedSymptoms,
+                        ageGroup,
+                        onset,
+                        familyHistory: familyStr,
+                        task_type: taskType,  // 后台：screening->DeepSeek，medication/lab_parse->Qwen
+                        // 站点账号绑定：透传 userId + token（匿名时为空字符串）
+                        userId: SITE_USER.userId,
+                        userToken: SITE_USER.token
+                    };
+                    const resp = await fetch(CONFIG.BACKEND_ANALYZE_URL, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            ...(SITE_USER.userId ? { 'X-User-Id': SITE_USER.userId } : {}),
+                            ...(SITE_USER.token ? { 'X-User-Token': SITE_USER.token } : {})
+                        },
+                        body: JSON.stringify(payload)
+                    });
+                    if (!resp.ok) throw new Error('后端分析失败');
+                    const llmResult = await resp.json();
+
+                    // 将LLM结果适配到现有渲染结构（简化）
+                    const adaptedReport = {
+                        input_symptoms: collectedSymptoms,
+                        age_onset: onset,
+                        family_history: familyStr,
+                        mapped_hpo: (llmResult.understood_phenotypes || []).map(p => ({ input: p, hpo_id: null, hpo_name: p })),
+                        top_differentials: (llmResult.differentials || []).map(d => ({
+                            name: d.disease,
+                            match_pct: d.confidence === '高' ? 85 : (d.confidence === '中' ? 60 : 35),
+                            matched_features: d.matched_features || [],
+                            recommended_tests: d.recommended_tests || '',
+                            referral_dept: d.referral || '',
+                            short_desc: d.reason || '',
+                            red_flags: d.red_flags || '',
+                            next_action: '请结合LLM建议尽快就医'
+                        })),
+                        generated_at: new Date().toLocaleString('zh-CN'),
+                        _llm_meta: llmResult._meta || {}
+                    };
+
                     status.classList.remove('flex');
                     status.classList.add('hidden');
-                    
-                    // Actually compute
-                    const report = computeReport(collectedSymptoms, onset, familyStr);
-                    renderResults(report, ageGroup, onset, familyStr);
-                    
+                    renderResults(adaptedReport, ageGroup, onset, familyStr);
                     content.classList.remove('hidden');
                     actions.classList.remove('hidden');
+
+                    // 元信息（不曝露具体模型；模型路由由后台决定）
+                    const metaDiv = document.createElement('div');
+                    metaDiv.className = 'mb-2 p-2 bg-blue-50 border border-blue-200 rounded text-xs';
+                    const meta = llmResult._meta || {};
+                    metaDiv.textContent = `智能分析引擎已完成分析 | 知识库：${meta.kb_source === 'oss' ? 'OSS最新' : '本地'} | ${meta.disclaimer || '本结果仅供参考，请尽快就医。'}`;
+                    content.prepend(metaDiv);
+
+                    // 如果有clarifying_questions，显示在结果上方
+                    if (llmResult.clarifying_questions && llmResult.clarifying_questions.length) {
+                        const note = document.createElement('div');
+                        note.className = 'mb-3 p-2 bg-amber-50 border border-amber-200 rounded text-sm';
+                        note.innerHTML = `<strong>建议进一步澄清：</strong> ${llmResult.clarifying_questions.join('；')}`;
+                        content.prepend(note);
+                    }
+                    return;
                 }
-            }, 620);
+
+                // 基础本地模式（原有逻辑）
+                const report = computeReport(collectedSymptoms, onset, familyStr);
+                status.classList.remove('flex');
+                status.classList.add('hidden');
+                renderResults(report, ageGroup, onset, familyStr);
+                content.classList.remove('hidden');
+                actions.classList.remove('hidden');
+
+            } catch (err) {
+                status.classList.remove('flex');
+                status.classList.add('hidden');
+                const ph = document.getElementById('results-placeholder');
+                if (ph) {
+                    ph.innerHTML = `<div class="p-3 text-red-700 bg-red-50 border border-red-200 rounded-2xl text-sm">分析失败：${err.message}。已回退基础模式，请检查网络或稍后重试。</div>`;
+                    ph.classList.remove('hidden');
+                }
+            }
         }
 
         function computeReport(symptoms, onset, family) {
@@ -1017,17 +1167,17 @@
             text += `主要症状/表型：\n${report.input_symptoms.map((s,i)=>`  ${i+1}. ${s}`).join('\n')}\n\n`;
             text += `标准化表型 (HPO)：\n`;
             report.mapped_hpo.forEach(m => text += `  • ${m.input} → ${m.hpo_id} (${m.hpo_name})\n`);
-            text += `\n差异诊断建议（Top ${report.top_differentials.length} ）：\n`;
+            text += `\n差异诊断建议（Top ${report.top_differentials.length}）：\n`;
             
             report.top_differentials.forEach((d, i) => {
-                text += `\n${i+1}. ${d.name}（匹配度 ${d.match_pct}% ）\n`;
+                text += `\n${i+1}. ${d.name}（匹配度 ${d.match_pct}%）\n`;
                 text += `   关键匹配：${d.matched_features.join('、') || '部分特征重叠'}\n`;
                 text += `   推荐检查：${d.recommended_tests}\n`;
                 text += `   建议科室：${d.referral_dept}\n`;
                 text += `   行动建议：${d.next_action}\n`;
             });
             
-            text += `\n【重要】此为AI辅助初筛，非诊断。请结合临床进行完整评估。\n来源：https://www.hjbxywy.com 罕见病初筛智能体`;
+            text += `\n【重要】此为AI辅助初筛，非诊断。请结合临床进行完整评估\n来源：https://www.hjbxywy.com 罕见病初筛智能体`;
             
             navigator.clipboard.writeText(text).then(() => {
                 const btns = document.querySelectorAll('#results-actions button');
@@ -1193,6 +1343,41 @@
             }
             
             window.__LAST_REPORT__ = null;
+        }
+
+        async function refreshKB() {
+            const backend = CONFIG.BACKEND_ANALYZE_URL;
+            if (!backend) {
+                alert('基础模式下使用内嵌KB。如需刷新，请配置后端地址并部署支持 /api/kb/refresh 的代理。');
+                return;
+            }
+            try {
+                const resp = await fetch(backend.replace('/analyze', '/kb/refresh'), { method: 'POST' });
+                const data = await resp.json();
+                alert('知识库已刷新: ' + (data.kb_last_updated || 'OK'));
+                // 重新加载前端缓存
+                dynamicKB = null;
+                await loadKBFromOSS();
+            } catch (e) {
+                alert('刷新失败: ' + e.message + ' (确保后端支持该端点)');
+            }
+        }
+
+        function updateInputForTask() {
+            const task = document.getElementById('task-type').value;
+            const symptomInput = document.getElementById('symptom-input');
+            const symptomLabel = document.querySelector('label[for="symptom-input"]') || document.querySelector('#symptom-chips').previousElementSibling;
+            
+            if (task === 'lab_parse') {
+                symptomInput.placeholder = '粘贴或描述化验单/检查报告内容（推荐切换 Qwen 模型）...';
+                if (symptomLabel) symptomLabel.textContent = '化验单 / 报告内容';
+            } else if (task === 'medication') {
+                symptomInput.placeholder = '描述当前症状、已确诊疾病、用药历史（推荐切换 Qwen 模型）...';
+                if (symptomLabel) symptomLabel.textContent = '症状与用药相关描述';
+            } else {
+                symptomInput.placeholder = '描述主要症状，例如：进行性双下肿无力、不能独坐、舌头有细小颤动...';
+                if (symptomLabel) symptomLabel.textContent = '症状描述与表型采集';
+            }
         }
 
         function showHelpModal() {
